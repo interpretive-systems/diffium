@@ -2,7 +2,8 @@ name: pr-validation
 
 on:
   pull_request:
-    types: [opened, edited, synchronize]
+    types: [opened, edited, synchronize, reopened, ready_for_review, assigned, unassigned, labeled, unlabeled]
+  workflow_dispatch:
 
 jobs:
   require-assignment-and-linked-issue:
