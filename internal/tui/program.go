@@ -7,6 +7,7 @@ import (
     "time"
 
     "github.com/charmbracelet/bubbles/viewport"
+    "github.com/charmbracelet/bubbles/textinput"
     tea "github.com/charmbracelet/bubbletea"
     "github.com/charmbracelet/lipgloss"
     "github.com/charmbracelet/x/ansi"
@@ -27,6 +28,17 @@ type model struct {
     showHelp    bool
     leftWidth   int
     rightVP     viewport.Model
+    // commit wizard state
+    showCommit  bool
+    commitStep  int // 0: select files, 1: message, 2: confirm/progress
+    cwFiles     []gitx.FileChange
+    cwSelected  map[string]bool
+    cwIndex     int
+    cwInput     textinput.Model
+    committing  bool
+    commitErr   string
+    commitDone  bool
+    lastCommit  string
 }
 
 // messages
@@ -54,7 +66,7 @@ func Run(repoRoot string) error {
 }
 
 func (m model) Init() tea.Cmd {
-    return tea.Batch(loadFiles(m.repoRoot), tickOnce())
+    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), tickOnce())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -66,17 +78,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 return m, tea.Quit
             case "h", "esc":
                 m.showHelp = false
-                return m, nil
+                return m, m.recalcViewport()
             default:
                 return m, nil
             }
+        }
+        if m.showCommit {
+            return m.handleCommitKeys(msg)
         }
         switch msg.String() {
         case "ctrl+c", "q":
             return m, tea.Quit
         case "h":
             m.showHelp = true
-            return m, nil
+            return m, m.recalcViewport()
+        case "c":
+            // Open commit wizard
+            m.openCommitWizard()
+            return m, m.recalcViewport()
         case "<", "H":
             if m.leftWidth == 0 {
                 m.leftWidth = m.width / 3
@@ -212,14 +231,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.rows = msg.rows
         }
         return m, m.recalcViewport()
+    case lastCommitMsg:
+        if msg.err == nil {
+            m.lastCommit = msg.summary
+        }
+        return m, nil
+    case commitProgressMsg:
+        m.committing = true
+        m.commitErr = ""
+        return m, nil
+    case commitResultMsg:
+        m.committing = false
+        if msg.err != nil {
+            m.commitErr = msg.err.Error()
+            m.commitDone = false
+        } else {
+            m.commitErr = ""
+            m.commitDone = true
+            m.showCommit = false
+            // refresh changes and last commit
+            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+        }
+        return m, nil
     }
     return m, nil
 }
 
 func (m model) View() string {
-    if m.showHelp {
-        return m.viewHelp()
-    }
     // Layout
     if m.width == 0 || m.height == 0 {
         return "Loading..."
@@ -241,8 +279,17 @@ func (m model) View() string {
     // Row 2: horizontal rule
     hr := strings.Repeat("─", m.width)
 
-    // Row 3: columns
-    contentHeight := m.height - 3 // top + rule + bottom bar
+    // Row 3: columns, then optional overlays, then bottom rule + bar
+    var overlay []string
+    if m.showHelp {
+        overlay = m.helpOverlayLines(m.width)
+    }
+    if m.showCommit {
+        overlay = append(overlay, m.commitOverlayLines(m.width)...)
+    }
+    overlayH := len(overlay)
+
+    contentHeight := m.height - 4 - overlayH // top + top rule + bottom rule + bottom bar
     if contentHeight < 1 {
         contentHeight = 1
     }
@@ -280,6 +327,19 @@ func (m model) View() string {
             b.WriteByte('\n')
         }
     }
+    // Optional overlay right above bottom bar
+    if overlayH > 0 {
+        b.WriteByte('\n')
+        for i, line := range overlay {
+            b.WriteString(padToWidth(line, m.width))
+            if i < overlayH-1 {
+                b.WriteByte('\n')
+            }
+        }
+    }
+    // Bottom rule and bottom bar
+    b.WriteByte('\n')
+    b.WriteString(strings.Repeat("─", m.width))
     b.WriteByte('\n')
     b.WriteString(m.bottomBar())
     return b.String()
@@ -373,12 +433,16 @@ func (m model) topRightTitle() string {
 }
 
 func (m model) bottomBar() string {
-    left := lipgloss.NewStyle().Faint(true).Render("h: help")
+    leftText := "h: help"
+    if m.lastCommit != "" {
+        leftText += "  |  last: " + m.lastCommit
+    }
+    left := lipgloss.NewStyle().Faint(true).Render(leftText)
     right := lipgloss.NewStyle().Faint(true).Render("refreshed: " + m.lastRefresh.Format("15:04:05"))
     w := m.width
     // Compose with right-aligned timestamp
-    leftW := runewidth.StringWidth(left)
-    rightW := runewidth.StringWidth(right)
+    leftW := lipgloss.Width(left)
+    rightW := lipgloss.Width(right)
     if leftW+rightW >= w {
         return padToWidth(left, w)
     }
@@ -478,7 +542,7 @@ func (m model) viewHelp() string {
 }
 
 // recalcViewport recalculates right viewport size and content based on current state.
-func (m model) recalcViewport() tea.Cmd {
+func (m *model) recalcViewport() tea.Cmd {
     if m.width == 0 || m.height == 0 {
         return nil
     }
@@ -490,7 +554,14 @@ func (m model) recalcViewport() tea.Cmd {
     if rightW < 1 {
         rightW = 1
     }
-    contentHeight := m.height - 3
+    overlayH := 0
+    if m.showHelp {
+        overlayH += len(m.helpOverlayLines(m.width))
+    }
+    if m.showCommit {
+        overlayH += len(m.commitOverlayLines(m.width))
+    }
+    contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
     }
@@ -501,6 +572,80 @@ func (m model) recalcViewport() tea.Cmd {
     content := strings.Join(m.rightBodyLinesAll(rightW), "\n")
     m.rightVP.SetContent(content)
     return nil
+}
+
+// helpOverlayLines returns the bottom overlay lines (without trailing newline).
+func (m model) helpOverlayLines(width int) []string {
+    if !m.showHelp {
+        return nil
+    }
+    // Header
+    title := lipgloss.NewStyle().Bold(true).Render("Help — press 'h' or Esc to close")
+    // Keys
+    keys := []string{
+        "j/k or arrows  Move selection",
+        "J/K, PgDn/PgUp  Scroll diff",
+        "</> or H/L      Adjust left pane width",
+        "s              Toggle side-by-side / inline",
+        "r              Refresh now",
+        "g / G          Top / Bottom",
+        "q              Quit",
+    }
+    lines := make([]string, 0, 2+len(keys))
+    // Overlay top rule
+    lines = append(lines, strings.Repeat("─", width))
+    lines = append(lines, title)
+    for _, k := range keys {
+        lines = append(lines, k)
+    }
+    return lines
+}
+
+func (m model) commitOverlayLines(width int) []string {
+    if !m.showCommit {
+        return nil
+    }
+    lines := make([]string, 0, 64)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.commitStep {
+    case 0:
+        title := lipgloss.NewStyle().Bold(true).Render("Commit — Select files (space: toggle, a: all, enter: continue, esc: cancel)")
+        lines = append(lines, title)
+        if len(m.cwFiles) == 0 {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("No changes to commit"))
+            return lines
+        }
+        for i, f := range m.cwFiles {
+            cur := "  "
+            if i == m.cwIndex {
+                cur = "> "
+            }
+            mark := "[ ]"
+            if m.cwSelected[f.Path] {
+                mark = "[x]"
+            }
+            status := fileStatusLabel(f)
+            lines = append(lines, fmt.Sprintf("%s%s %s %s", cur, mark, status, f.Path))
+        }
+    case 1:
+        title := lipgloss.NewStyle().Bold(true).Render("Commit — Message (enter: continue, b: back, esc: cancel)")
+        lines = append(lines, title)
+        lines = append(lines, m.cwInput.View())
+    case 2:
+        title := lipgloss.NewStyle().Bold(true).Render("Commit — Confirm (y/enter: confirm, b: back, esc: cancel)")
+        lines = append(lines, title)
+        // Summary
+        sel := m.selectedPaths()
+        lines = append(lines, fmt.Sprintf("Files: %d", len(sel)))
+        lines = append(lines, "Message: "+m.cwInput.Value())
+        if m.committing {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Committing..."))
+        }
+        if m.commitErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.commitErr)
+        }
+    }
+    return lines
 }
 
 func (m model) rightBodyLinesAll(width int) []string {
@@ -553,6 +698,168 @@ func (m model) rightBodyLinesAll(width int) []string {
     }
     return lines
 }
+
+// --- Commit wizard ---
+
+type lastCommitMsg struct{
+    summary string
+    err error
+}
+
+func loadLastCommit(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        s, err := gitx.LastCommitSummary(repoRoot)
+        return lastCommitMsg{summary: s, err: err}
+    }
+}
+
+func (m *model) openCommitWizard() {
+    m.showCommit = true
+    m.commitStep = 0
+    // snapshot files list
+    m.cwFiles = append([]gitx.FileChange(nil), m.files...)
+    m.cwSelected = map[string]bool{}
+    for _, f := range m.cwFiles {
+        m.cwSelected[f.Path] = true // default include all
+    }
+    m.cwIndex = 0
+    m.commitDone = false
+    m.commitErr = ""
+    m.committing = false
+    m.cwInput = textinput.Model{}
+    m.cwInput.Placeholder = "Commit message"
+    m.cwInput.CharLimit = 0
+}
+
+// handle commit wizard keys
+func (m model) handleCommitKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.commitStep {
+    case 0: // select files
+        switch key.String() {
+        case "esc":
+            m.showCommit = false
+            return m, m.recalcViewport()
+        case "enter":
+            m.commitStep = 1
+            // focus text input
+            ti := textinput.New()
+            ti.Placeholder = "Commit message"
+            ti.Prompt = "> "
+            ti.Focus()
+            m.cwInput = ti
+            return m, m.recalcViewport()
+        case "j", "down":
+            if len(m.cwFiles) > 0 && m.cwIndex < len(m.cwFiles)-1 {
+                m.cwIndex++
+            }
+            return m, nil
+        case "k", "up":
+            if m.cwIndex > 0 {
+                m.cwIndex--
+            }
+            return m, nil
+        case " ":
+            if len(m.cwFiles) > 0 {
+                p := m.cwFiles[m.cwIndex].Path
+                m.cwSelected[p] = !m.cwSelected[p]
+            }
+            return m, nil
+        case "a":
+            all := true
+            for _, f := range m.cwFiles {
+                if !m.cwSelected[f.Path] { all = false; break }
+            }
+            // toggle all
+            set := !all
+            for _, f := range m.cwFiles {
+                m.cwSelected[f.Path] = set
+            }
+            return m, nil
+        }
+    case 1: // message
+        switch key.String() {
+        case "esc":
+            m.showCommit = false
+            return m, m.recalcViewport()
+        case "b":
+            m.commitStep = 0
+            return m, m.recalcViewport()
+        case "enter":
+            m.commitStep = 2
+            m.commitDone = false
+            m.commitErr = ""
+            m.committing = false
+            return m, m.recalcViewport()
+        default:
+            // forward to text input
+            var cmd tea.Cmd
+            m.cwInput, cmd = m.cwInput.Update(key)
+            return m, cmd
+        }
+    case 2: // confirm/progress
+        switch key.String() {
+        case "esc":
+            // can't cancel mid-commit, but if not running: exit
+            if !m.committing {
+                m.showCommit = false
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "b":
+            if !m.committing && !m.commitDone {
+                m.commitStep = 1
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "y", "enter":
+            if !m.committing && !m.commitDone {
+                sel := m.selectedPaths()
+                if len(sel) == 0 {
+                    m.commitErr = "no files selected"
+                    return m, nil
+                }
+                if strings.TrimSpace(m.cwInput.Value()) == "" {
+                    m.commitErr = "empty commit message"
+                    return m, nil
+                }
+                m.commitErr = ""
+                m.committing = true
+                return m, runCommit(m.repoRoot, sel, m.cwInput.Value())
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func (m model) selectedPaths() []string {
+    var out []string
+    for _, f := range m.cwFiles {
+        if m.cwSelected[f.Path] {
+            out = append(out, f.Path)
+        }
+    }
+    return out
+}
+
+type commitProgressMsg struct{}
+type commitResultMsg struct{ err error }
+
+func runCommit(repoRoot string, paths []string, message string) tea.Cmd {
+    return func() tea.Msg {
+        // Stage selected files
+        if err := gitx.StageFiles(repoRoot, paths); err != nil {
+            return commitResultMsg{err: err}
+        }
+        // Commit
+        if err := gitx.Commit(repoRoot, message); err != nil {
+            return commitResultMsg{err: err}
+        }
+        return commitResultMsg{err: nil}
+    }
+}
+
+
 
 func colorizeLeft(r diffview.Row) string {
     switch r.Kind {

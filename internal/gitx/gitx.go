@@ -151,3 +151,38 @@ func isTracked(repoRoot, path string) bool {
     }
     return true
 }
+
+// StageFiles stages the provided file paths.
+func StageFiles(repoRoot string, paths []string) error {
+    if len(paths) == 0 {
+        return nil
+    }
+    args := append([]string{"-C", repoRoot, "add", "--"}, paths...)
+    cmd := exec.Command("git", args...)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git add: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// Commit performs a git commit with the given message.
+func Commit(repoRoot, message string) error {
+    if strings.TrimSpace(message) == "" {
+        return errors.New("empty commit message")
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "commit", "-m", message)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git commit: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// LastCommitSummary returns short hash and subject of last commit.
+func LastCommitSummary(repoRoot string) (string, error) {
+    cmd := exec.Command("git", "-C", repoRoot, "log", "-1", "--pretty=format:%h %s")
+    b, err := cmd.Output()
+    if err != nil {
+        return "", fmt.Errorf("git log: %w", err)
+    }
+    return strings.TrimSpace(string(b)), nil
+}
