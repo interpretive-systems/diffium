@@ -13,9 +13,12 @@ Watcher TUI that shows changed files on the left and a side-by-side diff on the 
 ### Keys
 
 - `j/k` or arrow keys: move selection
+- `J/K`, `PgDn/PgUp`: scroll diff
 - `s`: toggle side-by-side vs inline
 - `r`: refresh now (auto-refresh runs every second)
 - `g/G`: top/bottom
+- `h`: help panel
+- `<`/`>` or `H`/`L`: adjust left pane width
 - `q`: quit
 
-Notes: Requires `git` in PATH. Binary files are listed but not rendered as text diffs yet.
+The top bar shows `Changes | <file>` with a horizontal rule below. The bottom bar shows `h: help` on the left and the last `refreshed` time on the right. Requires `git` in PATH. Binary files are listed but not rendered as text diffs yet.
