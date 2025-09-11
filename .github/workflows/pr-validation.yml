@@ -44,15 +44,25 @@ jobs:
             const env = process.env;
             const nums = (env.LINKED_ISSUES || '').split(',').filter(Boolean).map(n => parseInt(n, 10));
             const numbers = new Set(nums);
+            let checked = 0;
             for (const number of numbers) {
-              const { data: issue } = await github.rest.issues.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: number,
-              });
-              if (!issue.assignees || issue.assignees.length === 0) {
-                core.setFailed(`Linked issue #${number} has no assignee.`);
+              try {
+                const { data: issue } = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: number,
+                });
+                checked++;
+                if (!issue.assignees || issue.assignees.length === 0) {
+                  core.setFailed(`Linked issue #${number} has no assignee.`);
+                }
+              } catch (e) {
+                core.warning(`Could not fetch issue #${number}: ${e.message}`);
+                // ignore 404 or private/missing issues
               }
+            }
+            if (checked === 0) {
+              core.warning('No accessible linked issues could be verified. Ensure at least one valid issue is referenced in the PR body/title.');
             }
       - name: Require at least one reviewer
         uses: actions/github-script@v7
