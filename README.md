@@ -24,6 +24,25 @@ Watcher TUI that shows changed files on the left and a side-by-side diff on the 
 
 The top bar shows `Changes | <file>` with a horizontal rule below. The bottom bar shows `h: help` on the left and the last `refreshed` time on the right. Requires `git` in PATH. Binary files are listed but not rendered as text diffs yet.
 
+## Quick Demo
+
+Fastest way to demo Diffium on macOS:
+
+- Open the watcher: `go run ./cmd/diffium watch`
+- In another terminal, edit the `testing` file in this repo:
+  - Add a line: `echo "New demo line" >> testing`
+  - Change a word (macOS sed): `sed -i '' 's/brown/green/' testing`
+  - Delete the last line: `sed -i '' -e '$d' testing`
+- Watch the left pane update and the right pane show a side-by-side diff.
+- Press `s` to toggle inline/side-by-side.
+- Press `c` to open the commit overlay; select files, enter a message, confirm to commit & push.
+
+Alternative demo with the Next.js sample:
+
+- `cd basic-nextjs`
+- Create a change: `printf "\n// demo change\n" >> pages/index.js`
+- Switch back to Diffium to review and commit.
+
 ### Commit Flow
 
 - Press `c` to open the commit overlay.

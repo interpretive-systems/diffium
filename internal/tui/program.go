@@ -126,6 +126,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
             if m.selected < len(m.files)-1 {
                 m.selected++
+                m.rows = nil
                 // Reset scroll for new file
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
@@ -136,18 +137,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
             if m.selected > 0 {
                 m.selected--
+                m.rows = nil
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
             }
         case "g":
             if len(m.files) > 0 {
                 m.selected = 0
+                m.rows = nil
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
             }
         case "G":
             if len(m.files) > 0 {
                 m.selected = len(m.files) - 1
+                m.rows = nil
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
             }

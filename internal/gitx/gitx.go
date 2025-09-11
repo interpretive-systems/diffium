@@ -123,10 +123,10 @@ func listNames(repoRoot string, args []string) ([]string, error) {
 func DiffHEAD(repoRoot, path string) (string, error) {
     var args []string
     if isTracked(repoRoot, path) {
-        args = []string{"-C", repoRoot, "diff", "--no-color", "HEAD", "--", path}
+        args = []string{"-C", repoRoot, "diff", "--no-color", "--text", "HEAD", "--", path}
     } else {
         // For untracked files, show diff vs /dev/null
-        args = []string{"-C", repoRoot, "diff", "--no-color", "--no-index", "/dev/null", path}
+        args = []string{"-C", repoRoot, "diff", "--no-color", "--no-index", "--text", "/dev/null", path}
     }
     cmd := exec.Command("git", args...)
     b, err := cmd.CombinedOutput()
@@ -141,13 +141,23 @@ func DiffHEAD(repoRoot, path string) (string, error) {
 func isBinary(repoRoot, path string) bool {
     var args []string
     if isTracked(repoRoot, path) {
-        args = []string{"-C", repoRoot, "diff", "--no-color", "HEAD", "--", path}
+        args = []string{"-C", repoRoot, "diff", "--numstat", "HEAD", "--", path}
     } else {
-        args = []string{"-C", repoRoot, "diff", "--no-color", "--no-index", "/dev/null", path}
+        args = []string{"-C", repoRoot, "diff", "--numstat", "--no-index", "/dev/null", path}
     }
     cmd := exec.Command("git", args...)
     b, _ := cmd.Output()
-    return bytes.Contains(b, []byte("Binary files"))
+    line := strings.TrimSpace(string(b))
+    if line == "" {
+        return false
+    }
+    // numstat returns "-\t-\tpath" for binary files
+    parts := strings.Split(line, "\t")
+    if len(parts) >= 2 && (parts[0] == "-" || parts[1] == "-") {
+        return true
+    }
+    // Fallback: detect textual mention just in case
+    return bytes.Contains(b, []byte("-\t-\t"))
 }
 
 func isTracked(repoRoot, path string) bool {

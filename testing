@@ -1,0 +1,16 @@
+Diffium demo playground
+
+This file exists so you can quickly demo Diffium’s live watcher.
+
+Try this:
+- Edit this file: change a word, add a line, or delete a line.
+- In another terminal, run: go run ./cmd/diffium watch
+- Watch the left pane update and the right pane show a side‑by‑side diff.
+- Press c to open the commit overlay and walk through the wizard.
+
+Sample text to edit below:
+
+Line A: The quick brown fox
+Line B: jumps over the lazy dog
+Line C: end of demo
+
