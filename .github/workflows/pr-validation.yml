@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check PR has assignee
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const pr = context.payload.pull_request;
@@ -18,7 +18,7 @@ jobs:
               core.setFailed('PR must have at least one assignee.');
             }
       - name: Require linked issue (mention or closing keywords)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const pr = context.payload.pull_request;
@@ -38,7 +38,7 @@ jobs:
             }
             core.exportVariable('LINKED_ISSUES', Array.from(numbers).join(','));
       - name: Check linked issues are assigned
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const env = process.env;
@@ -65,7 +65,7 @@ jobs:
               core.warning('No accessible linked issues could be verified. Ensure at least one valid issue is referenced in the PR body/title.');
             }
       - name: Require at least one reviewer
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const pr = context.payload.pull_request;
