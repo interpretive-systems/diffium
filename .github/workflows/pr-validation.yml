@@ -1,0 +1,66 @@
+name: pr-validation
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  require-assignment-and-linked-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR has assignee
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr.assignees || pr.assignees.length === 0) {
+              core.setFailed('PR must have at least one assignee.');
+            }
+      - name: Require linked issue via closing keywords
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = (pr.body || '') + '\n' + (pr.title || '');
+            const regex = /(close[sd]?|fixe[sd]?|resolve[sd]?)\s+#(\d+)/ig;
+            const found = new Set();
+            let m;
+            while ((m = regex.exec(body)) !== null) {
+              found.add(parseInt(m[2], 10));
+            }
+            if (found.size === 0) {
+              core.setFailed('PR must link an issue using closing keywords (e.g., "Closes #123").');
+            }
+            core.setOutput('issueNumbers', Array.from(found).join(','));
+      - name: Check linked issues are assigned
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = (pr.body || '') + '\n' + (pr.title || '');
+            const regex = /(close[sd]?|fixe[sd]?|resolve[sd]?)\s+#(\d+)/ig;
+            const numbers = new Set();
+            let m;
+            while ((m = regex.exec(body)) !== null) {
+              numbers.add(parseInt(m[2], 10));
+            }
+            for (const number of numbers) {
+              const { data: issue } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+              });
+              if (!issue.assignees || issue.assignees.length === 0) {
+                core.setFailed(`Linked issue #${number} has no assignee.`);
+              }
+            }
+            for (const number of found) {
+              const { data: issue } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: number,
+              });
+              if (!issue.assignees || issue.assignees.length === 0) {
+                core.setFailed(`Linked issue #${number} has no assignee.`);
+              }
+            }
