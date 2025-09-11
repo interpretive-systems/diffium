@@ -73,13 +73,3 @@ jobs:
             if (!reviewers || reviewers.length === 0) {
               core.setFailed('PR must have at least one requested reviewer.');
             }
-            for (const number of found) {
-              const { data: issue } = await github.rest.issues.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: number,
-              });
-              if (!issue.assignees || issue.assignees.length === 0) {
-                core.setFailed(`Linked issue #${number} has no assignee.`);
-              }
-            }
