@@ -17,6 +17,7 @@ import (
 
 type model struct {
     repoRoot    string
+    theme       Theme
     files       []gitx.FileChange
     selected    int
     rows        []diffview.Row
@@ -35,6 +36,7 @@ type model struct {
     cwSelected  map[string]bool
     cwIndex     int
     cwInput     textinput.Model
+    cwInputActive bool
     committing  bool
     commitErr   string
     commitDone  bool
@@ -57,7 +59,7 @@ type diffMsg struct {
 
 // Run instantiates and runs the Bubble Tea program.
 func Run(repoRoot string) error {
-    m := model{repoRoot: repoRoot, sideBySide: true}
+    m := model{repoRoot: repoRoot, sideBySide: true, theme: loadThemeFromRepo(repoRoot)}
     p := tea.NewProgram(m, tea.WithAltScreen())
     if _, err := p.Run(); err != nil {
         return err
@@ -274,12 +276,12 @@ func (m model) View() string {
     if rightW < 1 {
         rightW = 1
     }
-    sep := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("│")
+    sep := m.theme.DividerText("│")
 
     // Row 1: top bar
     top := "Changes | " + m.topRightTitle()
     // Row 2: horizontal rule
-    hr := strings.Repeat("─", m.width)
+    hr := m.theme.DividerText(strings.Repeat("─", m.width))
 
     // Row 3: columns, then optional overlays, then bottom rule + bar
     var overlay []string
@@ -386,7 +388,7 @@ func (m model) rightBodyLines(max, width int) []string {
         if colsW < 10 {
             colsW = 10
         }
-        mid := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("│")
+    mid := m.theme.DividerText("│")
         for _, r := range m.rows {
             switch r.Kind {
             case diffview.RowHunk:
@@ -394,8 +396,8 @@ func (m model) rightBodyLines(max, width int) []string {
             case diffview.RowMeta:
                 // skip
             default:
-                l := padToWidth(colorizeLeft(r), colsW)
-                rr := padToWidth(colorizeRight(r), colsW)
+                l := padToWidth(m.colorizeLeft(r), colsW)
+                rr := padToWidth(m.colorizeRight(r), colsW)
                 lines = append(lines, l+mid+rr)
             }
             if len(lines) >= max {
@@ -439,16 +441,23 @@ func (m model) bottomBar() string {
     if m.lastCommit != "" {
         leftText += "  |  last: " + m.lastCommit
     }
-    left := lipgloss.NewStyle().Faint(true).Render(leftText)
+    leftStyled := lipgloss.NewStyle().Faint(true).Render(leftText)
     right := lipgloss.NewStyle().Faint(true).Render("refreshed: " + m.lastRefresh.Format("15:04:05"))
     w := m.width
-    // Compose with right-aligned timestamp
-    leftW := lipgloss.Width(left)
+    // Ensure the right part is always visible; truncate left if needed
     rightW := lipgloss.Width(right)
-    if leftW+rightW >= w {
-        return padToWidth(left, w)
+    if rightW >= w {
+        // Degenerate case: screen too small; just show right truncated
+        return ansi.Truncate(right, w, "…")
     }
-    return left + strings.Repeat(" ", w-leftW-rightW) + right
+    avail := w - rightW - 1 // 1 space gap
+    leftRendered := leftStyled
+    if lipgloss.Width(leftRendered) > avail {
+        leftRendered = ansi.Truncate(leftRendered, avail, "…")
+    } else if lipgloss.Width(leftRendered) < avail {
+        leftRendered = leftRendered + strings.Repeat(" ", avail-lipgloss.Width(leftRendered))
+    }
+    return leftRendered + " " + right
 }
 
 func fileStatusLabel(f gitx.FileChange) string {
@@ -634,7 +643,9 @@ func (m model) commitOverlayLines(width int) []string {
             lines = append(lines, fmt.Sprintf("%s%s %s %s", cur, mark, status, f.Path))
         }
     case 1:
-        title := lipgloss.NewStyle().Bold(true).Render("Commit — Message (enter: continue, b: back, esc: cancel)")
+        mode := "action"
+        if m.cwInputActive { mode = "input" }
+        title := lipgloss.NewStyle().Bold(true).Render("Commit — Message (i: input, enter: continue, b: back, esc: " + map[bool]string{true:"leave input", false:"cancel"}[m.cwInputActive] + ") ["+mode+"]")
         lines = append(lines, title)
         lines = append(lines, m.cwInput.View())
     case 2:
@@ -672,16 +683,17 @@ func (m model) rightBodyLinesAll(width int) []string {
         if colsW < 10 {
             colsW = 10
         }
-        mid := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("│")
+        mid := m.theme.DividerText("│")
         for _, r := range m.rows {
             switch r.Kind {
             case diffview.RowHunk:
-                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render(r.Meta))
+                // Show a subtle separator instead of raw @@ header
+                lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowMeta:
                 // skip
             default:
-                l := padToWidth(colorizeLeft(r), colsW)
-                rr := padToWidth(colorizeRight(r), colsW)
+                l := m.renderSideCell(r, "left", colsW)
+                rr := m.renderSideCell(r, "right", colsW)
                 lines = append(lines, l+mid+rr)
             }
         }
@@ -689,16 +701,16 @@ func (m model) rightBodyLinesAll(width int) []string {
         for _, r := range m.rows {
             switch r.Kind {
             case diffview.RowHunk:
-                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render(r.Meta))
+                lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowContext:
-                lines = append(lines, " "+r.Left)
+                lines = append(lines, "  "+r.Left)
             case diffview.RowAdd:
-                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render("+ "+r.Right))
+                lines = append(lines, m.theme.AddText("+ "+r.Right))
             case diffview.RowDel:
-                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("- "+r.Left))
+                lines = append(lines, m.theme.DelText("- "+r.Left))
             case diffview.RowReplace:
-                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("- "+r.Left))
-                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render("+ "+r.Right))
+                lines = append(lines, m.theme.DelText("- "+r.Left))
+                lines = append(lines, m.theme.AddText("+ "+r.Right))
             }
         }
     }
@@ -735,6 +747,7 @@ func (m *model) openCommitWizard() {
     m.cwInput = textinput.Model{}
     m.cwInput.Placeholder = "Commit message"
     m.cwInput.CharLimit = 0
+    m.cwInputActive = false
 }
 
 // handle commit wizard keys
@@ -782,26 +795,46 @@ func (m model) handleCommitKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
             }
             return m, nil
         }
-    case 1: // message
+    case 1: // message (input/action modes)
         switch key.String() {
         case "esc":
+            if m.cwInputActive {
+                // leave input mode
+                m.cwInputActive = false
+                return m, m.recalcViewport()
+            }
             m.showCommit = false
             return m, m.recalcViewport()
+        case "i":
+            if !m.cwInputActive {
+                m.cwInputActive = true
+                m.cwInput.Focus()
+                return m, m.recalcViewport()
+            }
+            // if already active, treat as input
         case "b":
-            m.commitStep = 0
-            return m, m.recalcViewport()
+            if !m.cwInputActive {
+                m.commitStep = 0
+                return m, m.recalcViewport()
+            }
+            // in input mode, 'b' is literal
         case "enter":
-            m.commitStep = 2
-            m.commitDone = false
-            m.commitErr = ""
-            m.committing = false
-            return m, m.recalcViewport()
-        default:
-            // forward to text input
+            if !m.cwInputActive {
+                m.commitStep = 2
+                m.commitDone = false
+                m.commitErr = ""
+                m.committing = false
+                return m, m.recalcViewport()
+            }
+            // in input mode, forward to input
+        }
+        // Default: if input mode, forward to text input; else ignore
+        if m.cwInputActive {
             var cmd tea.Cmd
             m.cwInput, cmd = m.cwInput.Update(key)
             return m, cmd
         }
+        return m, nil
     case 2: // confirm/progress
         switch key.String() {
         case "esc":
@@ -871,14 +904,14 @@ func runCommit(repoRoot string, paths []string, message string) tea.Cmd {
 
 
 
-func colorizeLeft(r diffview.Row) string {
+func (m model) colorizeLeft(r diffview.Row) string {
     switch r.Kind {
     case diffview.RowContext:
         return r.Left
     case diffview.RowDel:
-        return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(r.Left)
+        return m.theme.DelText(r.Left)
     case diffview.RowReplace:
-        return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(r.Left)
+        return m.theme.DelText(r.Left)
     case diffview.RowAdd:
         return ""
     default:
@@ -886,17 +919,57 @@ func colorizeLeft(r diffview.Row) string {
     }
 }
 
-func colorizeRight(r diffview.Row) string {
+func (m model) colorizeRight(r diffview.Row) string {
     switch r.Kind {
     case diffview.RowContext:
         return r.Right
     case diffview.RowAdd:
-        return lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render(r.Right)
+        return m.theme.AddText(r.Right)
     case diffview.RowReplace:
-        return lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render(r.Right)
+        return m.theme.AddText(r.Right)
     case diffview.RowDel:
         return ""
     default:
         return r.Right
     }
+}
+
+// renderSideCell renders a left or right cell with a colored marker and padding.
+// side is "left" or "right". width is the total cell width.
+func (m model) renderSideCell(r diffview.Row, side string, width int) string {
+    marker := " "
+    content := ""
+    switch side {
+    case "left":
+        content = r.Left
+        switch r.Kind {
+        case diffview.RowContext:
+            marker = " "
+        case diffview.RowDel, diffview.RowReplace:
+            marker = m.theme.DelText("-")
+            content = m.theme.DelText(content)
+        case diffview.RowAdd:
+            marker = " "
+            content = ""
+        }
+    case "right":
+        content = r.Right
+        switch r.Kind {
+        case diffview.RowContext:
+            marker = " "
+        case diffview.RowAdd, diffview.RowReplace:
+            marker = m.theme.AddText("+")
+            content = m.theme.AddText(content)
+        case diffview.RowDel:
+            marker = " "
+            content = ""
+        }
+    }
+    // Reserve 2 cols: marker + space
+    if width <= 2 {
+        return ansi.Truncate(marker+" ", width, "")
+    }
+    bodyW := width - 2
+    body := padToWidth(content, bodyW)
+    return marker + " " + body
 }

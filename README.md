@@ -30,8 +30,25 @@ The top bar shows `Changes | <file>` with a horizontal rule below. The bottom ba
 - Step 1: Select files
   - `j/k` to move, `space` to toggle file, `a` toggle all, `enter` to continue, `esc` to cancel.
 - Step 2: Commit message
-  - Type your message, `enter` to continue, `b` to go back, `esc` to cancel.
+  - Action mode by default: `i` to enter input mode, `enter` to continue, `b` back, `esc` cancel.
+  - In input mode: type to edit; `esc` leaves input mode (does not cancel).
 - Step 3: Confirm
   - `y`/`enter` to commit & push, `b` to go back, `esc` to cancel.
 
 After commit & push, the overlay closes, file list refreshes, and the bottom bar shows `last: <hash subject>` next to `h: help`.
+
+### Theming
+
+Diffium supports simple, repo-local theming via `.diffium/theme.json` (relative to the repo root you are watching). Example:
+
+```
+{
+  "addColor": "#22c55e",
+  "delColor": "#ef4444",
+  "dividerColor": "240"
+}
+```
+
+Notes:
+- Colors accept hex (e.g., `#22c55e`) or ANSI color indexes as strings (e.g., `"34"`, `"196"`).
+- Omitted fields use defaults.
