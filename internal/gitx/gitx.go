@@ -17,6 +17,7 @@ type FileChange struct {
     Unstaged  bool
     Untracked bool
     Binary    bool
+    Deleted   bool
 }
 
 // RepoRoot resolves the git repository root from a given path (or current dir).
@@ -38,13 +39,13 @@ func RepoRoot(path string) (string, error) {
 
 // ChangedFiles lists files changed relative to HEAD, combining staged, unstaged, and untracked.
 func ChangedFiles(repoRoot string) ([]FileChange, error) {
-    // Unstaged vs index
-    unstaged, err := listNames(repoRoot, []string{"diff", "--name-only", "--diff-filter=ACMRTUXB"})
+    // Unstaged vs index (include deletions)
+    unstaged, err := listNames(repoRoot, []string{"diff", "--name-only", "--diff-filter=ACDMRTUXB"})
     if err != nil {
         return nil, err
     }
     // Staged vs HEAD
-    staged, err := listNames(repoRoot, []string{"diff", "--name-only", "--cached", "--diff-filter=ACMRTUXB"})
+    staged, err := listNames(repoRoot, []string{"diff", "--name-only", "--cached", "--diff-filter=ACDMRTUXB"})
     if err != nil {
         return nil, err
     }
@@ -53,6 +54,9 @@ func ChangedFiles(repoRoot string) ([]FileChange, error) {
     if err != nil {
         return nil, err
     }
+    // Deletions detail
+    deletedUnstaged, _ := listNames(repoRoot, []string{"ls-files", "-d"}) // deleted in WT, not staged
+    deletedStaged, _ := listNames(repoRoot, []string{"diff", "--cached", "--name-only", "--diff-filter=D"})
 
     m := map[string]*FileChange{}
     mark := func(paths []string, fn func(fc *FileChange)) {
@@ -74,6 +78,8 @@ func ChangedFiles(repoRoot string) ([]FileChange, error) {
     mark(unstaged, func(fc *FileChange) { fc.Unstaged = true })
     mark(staged, func(fc *FileChange) { fc.Staged = true })
     mark(untracked, func(fc *FileChange) { fc.Untracked = true })
+    mark(deletedUnstaged, func(fc *FileChange) { fc.Deleted = true; fc.Unstaged = true })
+    mark(deletedStaged, func(fc *FileChange) { fc.Deleted = true; fc.Staged = true })
 
     // Determine potential binaries by probing diff header quickly
     paths := make([]string, 0, len(m))
@@ -157,7 +163,8 @@ func StageFiles(repoRoot string, paths []string) error {
     if len(paths) == 0 {
         return nil
     }
-    args := append([]string{"-C", repoRoot, "add", "--"}, paths...)
+    // Use -A to ensure deletions are staged too, but still scoped to pathspecs
+    args := append([]string{"-C", repoRoot, "add", "-A", "--"}, paths...)
     cmd := exec.Command("git", args...)
     if out, err := cmd.CombinedOutput(); err != nil {
         return fmt.Errorf("git add: %w: %s", err, string(out))
@@ -173,6 +180,38 @@ func Commit(repoRoot, message string) error {
     cmd := exec.Command("git", "-C", repoRoot, "commit", "-m", message)
     if out, err := cmd.CombinedOutput(); err != nil {
         return fmt.Errorf("git commit: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// Push attempts to push the current branch. If no upstream is set,
+// it falls back to pushing to the first remote (or origin) with -u.
+func Push(repoRoot string) error {
+    // Try simple push first
+    cmd := exec.Command("git", "-C", repoRoot, "push")
+    if out, err := cmd.CombinedOutput(); err == nil {
+        return nil
+    } else {
+        // Fallback logic
+        // Get current branch
+        bcmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+        bOut, bErr := bcmd.Output()
+        if bErr != nil {
+            return fmt.Errorf("git push: %w: %s", err, string(out))
+        }
+        branch := strings.TrimSpace(string(bOut))
+        // Choose remote
+        rcmd := exec.Command("git", "-C", repoRoot, "remote")
+        rOut, _ := rcmd.Output()
+        remotes := strings.Fields(string(rOut))
+        remote := "origin"
+        if len(remotes) > 0 {
+            remote = remotes[0]
+        }
+        cmd2 := exec.Command("git", "-C", repoRoot, "push", "-u", remote, branch)
+        if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+            return fmt.Errorf("git push: %w: %s", err2, string(out2))
+        }
     }
     return nil
 }

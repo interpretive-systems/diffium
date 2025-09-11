@@ -245,6 +245,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if msg.err != nil {
             m.commitErr = msg.err.Error()
             m.commitDone = false
+            // refresh even on error (commit may have succeeded but push failed)
+            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
         } else {
             m.commitErr = ""
             m.commitDone = true
@@ -451,6 +453,9 @@ func (m model) bottomBar() string {
 
 func fileStatusLabel(f gitx.FileChange) string {
     var tags []string
+    if f.Deleted {
+        tags = append(tags, "D")
+    }
     if f.Untracked {
         tags = append(tags, "U")
     }
@@ -586,6 +591,7 @@ func (m model) helpOverlayLines(width int) []string {
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
+        "c              Commit & push (open wizard)",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
         "g / G          Top / Bottom",
@@ -632,14 +638,14 @@ func (m model) commitOverlayLines(width int) []string {
         lines = append(lines, title)
         lines = append(lines, m.cwInput.View())
     case 2:
-        title := lipgloss.NewStyle().Bold(true).Render("Commit — Confirm (y/enter: confirm, b: back, esc: cancel)")
+        title := lipgloss.NewStyle().Bold(true).Render("Commit — Confirm (y/enter: commit & push, b: back, esc: cancel)")
         lines = append(lines, title)
         // Summary
         sel := m.selectedPaths()
         lines = append(lines, fmt.Sprintf("Files: %d", len(sel)))
         lines = append(lines, "Message: "+m.cwInput.Value())
         if m.committing {
-            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Committing..."))
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Committing & pushing..."))
         }
         if m.commitErr != "" {
             lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.commitErr)
@@ -853,6 +859,10 @@ func runCommit(repoRoot string, paths []string, message string) tea.Cmd {
         }
         // Commit
         if err := gitx.Commit(repoRoot, message); err != nil {
+            return commitResultMsg{err: err}
+        }
+        // Push
+        if err := gitx.Push(repoRoot); err != nil {
             return commitResultMsg{err: err}
         }
         return commitResultMsg{err: nil}

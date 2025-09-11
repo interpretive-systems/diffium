@@ -32,6 +32,6 @@ The top bar shows `Changes | <file>` with a horizontal rule below. The bottom ba
 - Step 2: Commit message
   - Type your message, `enter` to continue, `b` to go back, `esc` to cancel.
 - Step 3: Confirm
-  - `y`/`enter` to commit, `b` to go back, `esc` to cancel.
+  - `y`/`enter` to commit & push, `b` to go back, `esc` to cancel.
 
-After commit, the overlay closes, file list refreshes, and the bottom bar shows `last: <hash subject>` next to `h: help`.
+After commit & push, the overlay closes, file list refreshes, and the bottom bar shows `last: <hash subject>` next to `h: help`.
