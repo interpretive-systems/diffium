@@ -13,7 +13,8 @@ Thanks for your interest in contributing! This document outlines how to propose 
 
 - Before starting work, please open an issue describing the problem or feature.
 - Assign yourself to the issue. Our CI enforces that PRs have an assignee and that linked issues are assigned.
-- Reference the issue in your PR description or title using closing keywords, e.g. `Closes #123`. CI will fail if no linked issue is found.
+- Reference the issue in your PR description or title (e.g., `#123`). Closing keywords like `Closes #123` are optional. CI will fail if no linked issue is found.
+- Request at least one reviewer on your PR (CI enforces this).
 
 ## Branching and PRs
 

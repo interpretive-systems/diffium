@@ -17,34 +17,33 @@ jobs:
             if (!pr.assignees || pr.assignees.length === 0) {
               core.setFailed('PR must have at least one assignee.');
             }
-      - name: Require linked issue via closing keywords
+      - name: Require linked issue (mention or closing keywords)
         uses: actions/github-script@v7
         with:
           script: |
             const pr = context.payload.pull_request;
             const body = (pr.body || '') + '\n' + (pr.title || '');
-            const regex = /(close[sd]?|fixe[sd]?|resolve[sd]?)\s+#(\d+)/ig;
-            const found = new Set();
+            const closeRegex = /(close[sd]?|fixe[sd]?|resolve[sd]?)\s+#(\d+)/ig;
+            const mentionRegex = /#(\d+)/g;
+            const numbers = new Set();
             let m;
-            while ((m = regex.exec(body)) !== null) {
-              found.add(parseInt(m[2], 10));
+            while ((m = closeRegex.exec(body)) !== null) {
+              numbers.add(parseInt(m[2], 10));
             }
-            if (found.size === 0) {
-              core.setFailed('PR must link an issue using closing keywords (e.g., "Closes #123").');
+            while ((m = mentionRegex.exec(body)) !== null) {
+              numbers.add(parseInt(m[1], 10));
             }
-            core.setOutput('issueNumbers', Array.from(found).join(','));
+            if (numbers.size === 0) {
+              core.setFailed('PR must link an issue (e.g., add "#123" in the title/body or use closing keywords).');
+            }
+            core.exportVariable('LINKED_ISSUES', Array.from(numbers).join(','));
       - name: Check linked issues are assigned
         uses: actions/github-script@v7
         with:
           script: |
-            const pr = context.payload.pull_request;
-            const body = (pr.body || '') + '\n' + (pr.title || '');
-            const regex = /(close[sd]?|fixe[sd]?|resolve[sd]?)\s+#(\d+)/ig;
-            const numbers = new Set();
-            let m;
-            while ((m = regex.exec(body)) !== null) {
-              numbers.add(parseInt(m[2], 10));
-            }
+            const env = process.env;
+            const nums = (env.LINKED_ISSUES || '').split(',').filter(Boolean).map(n => parseInt(n, 10));
+            const numbers = new Set(nums);
             for (const number of numbers) {
               const { data: issue } = await github.rest.issues.get({
                 owner: context.repo.owner,
@@ -54,6 +53,15 @@ jobs:
               if (!issue.assignees || issue.assignees.length === 0) {
                 core.setFailed(`Linked issue #${number} has no assignee.`);
               }
+            }
+      - name: Require at least one reviewer
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const reviewers = (pr.requested_reviewers || []).map(r => r.login);
+            if (!reviewers || reviewers.length === 0) {
+              core.setFailed('PR must have at least one requested reviewer.');
             }
             for (const number of found) {
               const { data: issue } = await github.rest.issues.get({
