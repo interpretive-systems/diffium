@@ -23,6 +23,7 @@ Watcher TUI that shows changed files on the left and a side-by-side diff on the 
 - `j/k` or arrow keys: move selection
 - `J/K`, `PgDn/PgUp`: scroll diff
 - `s`: toggle side-by-side vs inline
+- `u`: open uncommit wizard (remove selected files from last commit; shows all current changes for selection)
 - `r`: refresh now (auto-refresh runs every second)
 - `g/G`: top/bottom
 - `h`: help panel

@@ -6,8 +6,8 @@ import (
     "strings"
     "time"
 
-    "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/bubbles/textinput"
+    "github.com/charmbracelet/bubbles/viewport"
     tea "github.com/charmbracelet/bubbletea"
     "github.com/charmbracelet/lipgloss"
     "github.com/charmbracelet/x/ansi"
@@ -41,6 +41,16 @@ type model struct {
     commitErr   string
     commitDone  bool
     lastCommit  string
+    // uncommit wizard state
+    showUncommit   bool
+    ucStep         int // 0: select files, 1: confirm/progress
+    ucFiles        []gitx.FileChange // list ALL current changes (like commit wizard)
+    ucSelected     map[string]bool   // keyed by path
+    ucIndex        int
+    ucEligible     map[string]bool   // paths that are part of HEAD (last commit)
+    uncommitting   bool
+    uncommitErr    string
+    uncommitDone   bool
 }
 
 // messages
@@ -88,6 +98,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showCommit {
             return m.handleCommitKeys(msg)
         }
+        if m.showUncommit {
+            return m.handleUncommitKeys(msg)
+        }
         switch msg.String() {
         case "ctrl+c", "q":
             return m, tea.Quit
@@ -98,6 +111,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             // Open commit wizard
             m.openCommitWizard()
             return m, m.recalcViewport()
+        case "u":
+            // Open uncommit wizard
+            m.openUncommitWizard()
+            return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
         case "<", "H":
             if m.leftWidth == 0 {
                 m.leftWidth = m.width / 3
@@ -261,6 +278,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
         }
         return m, nil
+    case uncommitFilesMsg:
+        if msg.err != nil {
+            m.uncommitErr = msg.err.Error()
+            m.ucFiles = nil
+            m.ucSelected = map[string]bool{}
+            m.ucIndex = 0
+            return m, m.recalcViewport()
+        }
+        m.ucFiles = msg.files
+        m.ucSelected = map[string]bool{}
+        for _, f := range m.ucFiles {
+            m.ucSelected[f.Path] = true
+        }
+        m.ucIndex = 0
+        return m, m.recalcViewport()
+    case uncommitEligibleMsg:
+        if msg.err != nil {
+            // No parent commit or other issue; treat as no eligible files.
+            m.ucEligible = map[string]bool{}
+            return m, m.recalcViewport()
+        }
+        m.ucEligible = map[string]bool{}
+        for _, p := range msg.paths {
+            m.ucEligible[p] = true
+        }
+        return m, m.recalcViewport()
+    case uncommitResultMsg:
+        m.uncommitting = false
+        if msg.err != nil {
+            m.uncommitErr = msg.err.Error()
+            m.uncommitDone = false
+            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+        }
+        m.uncommitErr = ""
+        m.uncommitDone = true
+        m.showUncommit = false
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
     }
     return m, nil
 }
@@ -294,6 +348,9 @@ func (m model) View() string {
     }
     if m.showCommit {
         overlay = append(overlay, m.commitOverlayLines(m.width)...)
+    }
+    if m.showUncommit {
+        overlay = append(overlay, m.uncommitOverlayLines(m.width)...)
     }
     overlayH := len(overlay)
 
@@ -579,6 +636,9 @@ func (m *model) recalcViewport() tea.Cmd {
     if m.showCommit {
         overlayH += len(m.commitOverlayLines(m.width))
     }
+    if m.showUncommit {
+        overlayH += len(m.uncommitOverlayLines(m.width))
+    }
     contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
@@ -604,6 +664,7 @@ func (m model) helpOverlayLines(width int) []string {
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
+        "u              Uncommit (open wizard)",
         "c              Commit & push (open wizard)",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
@@ -669,6 +730,192 @@ func (m model) commitOverlayLines(width int) []string {
     return lines
 }
 
+// --- Uncommit wizard ---
+
+type uncommitFilesMsg struct {
+    files []gitx.FileChange
+    err   error
+}
+
+type uncommitResultMsg struct{ err error }
+
+func loadUncommitFiles(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        files, err := gitx.ChangedFiles(repoRoot)
+        return uncommitFilesMsg{files: files, err: err}
+    }
+}
+
+type uncommitEligibleMsg struct {
+    paths []string
+    err   error
+}
+
+func loadUncommitEligible(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        ps, err := gitx.FilesInLastCommit(repoRoot)
+        return uncommitEligibleMsg{paths: ps, err: err}
+    }
+}
+
+func (m *model) openUncommitWizard() {
+    m.showUncommit = true
+    m.ucStep = 0
+    m.ucFiles = nil
+    m.ucSelected = map[string]bool{}
+    m.ucIndex = 0
+    m.uncommitting = false
+    m.uncommitErr = ""
+    m.uncommitDone = false
+}
+
+func (m model) uncommitOverlayLines(width int) []string {
+    if !m.showUncommit {
+        return nil
+    }
+    lines := make([]string, 0, 64)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.ucStep {
+    case 0:
+        title := lipgloss.NewStyle().Bold(true).Render("Uncommit — Select files (space: toggle, a: all, enter: continue, esc: cancel)")
+        lines = append(lines, title)
+        if len(m.ucFiles) == 0 && m.uncommitErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Loading files…"))
+            return lines
+        }
+        if m.uncommitErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.uncommitErr)
+        }
+        if len(m.ucFiles) == 0 && m.uncommitErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("No changes to choose from"))
+            return lines
+        }
+        for i, f := range m.ucFiles {
+            cur := "  "
+            if i == m.ucIndex { cur = "> " }
+            mark := "[ ]"
+            if m.ucSelected[f.Path] { mark = "[x]" }
+            status := fileStatusLabel(f)
+            lines = append(lines, fmt.Sprintf("%s%s %s %s", cur, mark, status, f.Path))
+        }
+    case 1:
+        title := lipgloss.NewStyle().Bold(true).Render("Uncommit — Confirm (y/enter: uncommit, b: back, esc: cancel)")
+        lines = append(lines, title)
+        sel := m.uncommitSelectedPaths()
+        total := len(sel)
+        elig := 0
+        if m.ucEligible != nil {
+            for _, p := range sel { if m.ucEligible[p] { elig++ } }
+        }
+        inelig := total - elig
+        lines = append(lines, fmt.Sprintf("Selected: %d  Eligible to uncommit: %d  Ignored: %d", total, elig, inelig))
+        if m.ucEligible == nil {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(resolving eligibility…)"))
+        }
+        if m.uncommitting {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Uncommitting…"))
+        }
+        if m.uncommitErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.uncommitErr)
+        }
+    }
+    return lines
+}
+
+func (m model) handleUncommitKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.ucStep {
+    case 0:
+        switch key.String() {
+        case "esc":
+            m.showUncommit = false
+            return m, m.recalcViewport()
+        case "enter":
+            if len(m.ucFiles) == 0 {
+                return m, nil
+            }
+            m.ucStep = 1
+            m.uncommitErr = ""
+            m.uncommitDone = false
+            m.uncommitting = false
+            return m, m.recalcViewport()
+        case "j", "down":
+            if len(m.ucFiles) > 0 && m.ucIndex < len(m.ucFiles)-1 { m.ucIndex++ }
+            return m, nil
+        case "k", "up":
+            if m.ucIndex > 0 { m.ucIndex-- }
+            return m, nil
+        case " ":
+            if len(m.ucFiles) > 0 {
+                p := m.ucFiles[m.ucIndex].Path
+                m.ucSelected[p] = !m.ucSelected[p]
+            }
+            return m, nil
+        case "a":
+            all := true
+            for _, f := range m.ucFiles { if !m.ucSelected[f.Path] { all = false; break } }
+            set := !all
+            for _, f := range m.ucFiles { m.ucSelected[f.Path] = set }
+            return m, nil
+        }
+    case 1:
+        switch key.String() {
+        case "esc":
+            if !m.uncommitting {
+                m.showUncommit = false
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "b":
+            if !m.uncommitting && !m.uncommitDone {
+                m.ucStep = 0
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "y", "enter":
+            if !m.uncommitting && !m.uncommitDone {
+                sel := m.uncommitSelectedPaths()
+                if len(sel) == 0 {
+                    m.uncommitErr = "no files selected"
+                    return m, nil
+                }
+                m.uncommitErr = ""
+                m.uncommitting = true
+                return m, runUncommit(m.repoRoot, sel)
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func (m model) uncommitSelectedPaths() []string {
+    var out []string
+    for _, f := range m.ucFiles {
+        if m.ucSelected[f.Path] { out = append(out, f.Path) }
+    }
+    return out
+}
+
+func runUncommit(repoRoot string, paths []string) tea.Cmd {
+    return func() tea.Msg {
+        // Filter to eligible paths (present in last commit)
+        eligible, err := gitx.FilesInLastCommit(repoRoot)
+        if err != nil {
+            return uncommitResultMsg{err: err}
+        }
+        eligSet := map[string]bool{}
+        for _, p := range eligible { eligSet[p] = true }
+        var toUncommit []string
+        for _, p := range paths { if eligSet[p] { toUncommit = append(toUncommit, p) } }
+        if len(toUncommit) == 0 {
+            return uncommitResultMsg{err: fmt.Errorf("no selected files are in the last commit")}
+        }
+        if err := gitx.UncommitFiles(repoRoot, toUncommit); err != nil {
+            return uncommitResultMsg{err: err}
+        }
+        return uncommitResultMsg{err: nil}
+    }
+}
 func (m model) rightBodyLinesAll(width int) []string {
     lines := make([]string, 0, 1024)
     if len(m.files) == 0 {
