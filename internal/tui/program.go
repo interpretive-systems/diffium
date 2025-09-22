@@ -75,6 +75,8 @@ type model struct {
     brRunning    bool
     brErr        string
     brDone       bool
+    brInput      textinput.Model
+    brInputActive bool
 }
 
 // messages
@@ -927,6 +929,8 @@ func (m *model) openBranchWizard() {
     m.brRunning = false
     m.brErr = ""
     m.brDone = false
+    m.brInput = textinput.Model{}
+    m.brInputActive = false
 }
 
 func (m model) branchOverlayLines(width int) []string {
@@ -935,7 +939,7 @@ func (m model) branchOverlayLines(width int) []string {
     lines = append(lines, strings.Repeat("─", width))
     switch m.brStep {
     case 0:
-        title := lipgloss.NewStyle().Bold(true).Render("Branches — Select (enter: continue, esc: cancel)")
+        title := lipgloss.NewStyle().Bold(true).Render("Branches — Select (enter: continue, n: new, esc: cancel)")
         lines = append(lines, title)
         if m.brErr != "" {
             lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
@@ -965,6 +969,27 @@ func (m model) branchOverlayLines(width int) []string {
         if m.brErr != "" {
             lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
         }
+    case 2:
+        // New branch: name input
+        mode := "action"
+        if m.brInputActive { mode = "input" }
+        title := lipgloss.NewStyle().Bold(true).Render("New Branch — Name (i: input, enter: continue, b: back, esc: " + map[bool]string{true:"leave input", false:"cancel"}[m.brInputActive] + ") ["+mode+"]")
+        lines = append(lines, title)
+        lines = append(lines, m.brInput.View())
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+    case 3:
+        // New branch: confirm
+        title := lipgloss.NewStyle().Bold(true).Render("New Branch — Confirm (y/enter: create, b: back, esc: cancel)")
+        lines = append(lines, title)
+        lines = append(lines, "Name: "+m.brInput.Value())
+        if m.brRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Creating…"))
+        }
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
     }
     return lines
 }
@@ -982,6 +1007,19 @@ func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
         case "k", "up":
             if m.brIndex > 0 { m.brIndex-- }
             return m, nil
+        case "n":
+            // New branch flow
+            ti := textinput.New()
+            ti.Placeholder = "Branch name"
+            ti.Prompt = "> "
+            // Start in action mode; 'i' toggles input focus
+            m.brInput = ti
+            m.brInputActive = false
+            m.brStep = 2
+            m.brErr = ""
+            m.brDone = false
+            m.brRunning = false
+            return m, m.recalcViewport()
         case "enter":
             if len(m.brBranches) == 0 { return m, nil }
             m.brStep = 1
@@ -1008,6 +1046,69 @@ func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
             }
             return m, nil
         }
+    case 2: // new branch name
+        switch key.String() {
+        case "esc":
+            if m.brInputActive {
+                m.brInputActive = false
+                return m, m.recalcViewport()
+            }
+            m.showBranch = false
+            return m, m.recalcViewport()
+        case "i":
+            if !m.brInputActive {
+                m.brInputActive = true
+                m.brInput.Focus()
+                return m, m.recalcViewport()
+            }
+            // already active, treat as input
+        case "b":
+            if !m.brInputActive {
+                m.brStep = 0
+                return m, m.recalcViewport()
+            }
+            // else forward to input
+        case "enter":
+            if !m.brInputActive {
+                if strings.TrimSpace(m.brInput.Value()) == "" {
+                    m.brErr = "empty branch name"
+                    return m, nil
+                }
+                m.brStep = 3
+                m.brErr = ""
+                m.brDone = false
+                m.brRunning = false
+                return m, m.recalcViewport()
+            }
+            // in input mode, forward to text input
+        }
+        if m.brInputActive {
+            var cmd tea.Cmd
+            m.brInput, cmd = m.brInput.Update(key)
+            return m, cmd
+        }
+        return m, nil
+    case 3: // confirm new branch
+        switch key.String() {
+        case "esc":
+            if !m.brRunning { m.showBranch = false; return m, m.recalcViewport() }
+            return m, nil
+        case "b":
+            if !m.brRunning && !m.brDone { m.brStep = 2; return m, m.recalcViewport() }
+            return m, nil
+        case "y", "enter":
+            if !m.brRunning && !m.brDone {
+                name := strings.TrimSpace(m.brInput.Value())
+                if name == "" {
+                    m.brErr = "empty branch name"
+                    return m, nil
+                }
+                m.brRunning = true
+                m.brErr = ""
+                return m, runCreateBranch(m.repoRoot, name)
+            }
+            return m, nil
+        }
     }
     return m, nil
 }
@@ -1015,6 +1116,15 @@ func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func runCheckout(repoRoot, branch string) tea.Cmd {
     return func() tea.Msg {
         if err := gitx.Checkout(repoRoot, branch); err != nil {
+            return branchResultMsg{err: err}
+        }
+        return branchResultMsg{err: nil}
+    }
+}
+
+func runCreateBranch(repoRoot, name string) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.CheckoutNew(repoRoot, name); err != nil {
             return branchResultMsg{err: err}
         }
         return branchResultMsg{err: nil}

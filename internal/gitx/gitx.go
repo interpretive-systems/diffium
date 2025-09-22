@@ -383,3 +383,15 @@ func Checkout(repoRoot, branch string) error {
     }
     return nil
 }
+
+// CheckoutNew creates and switches to a new branch: `git checkout -b <name>`.
+func CheckoutNew(repoRoot, name string) error {
+    if strings.TrimSpace(name) == "" {
+        return errors.New("empty branch name")
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "checkout", "-b", name)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git checkout -b %s: %w: %s", name, err, string(out))
+    }
+    return nil
+}
