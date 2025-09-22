@@ -31,6 +31,7 @@ type model struct {
     leftOffset  int
     rightVP     viewport.Model
     rightXOffset int
+    wrapLines    bool
     // commit wizard state
     showCommit  bool
     commitStep  int // 0: select files, 1: message, 2: confirm/progress
@@ -265,8 +266,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "s":
             m.sideBySide = !m.sideBySide
             return m, m.recalcViewport()
+        case "w":
+            // Toggle wrap in diff pane
+            m.wrapLines = !m.wrapLines
+            if m.wrapLines {
+                m.rightXOffset = 0
+            }
+            return m, m.recalcViewport()
         // Horizontal scroll for right pane
         case "left", "{":
+            if m.wrapLines { return m, nil }
             if m.rightXOffset > 0 {
                 m.rightXOffset -= 4
                 if m.rightXOffset < 0 { m.rightXOffset = 0 }
@@ -274,6 +283,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
             return m, nil
         case "right", "}":
+            if m.wrapLines { return m, nil }
             m.rightXOffset += 4
             return m, m.recalcViewport()
         case "home":
@@ -904,6 +914,7 @@ func (m model) helpOverlayLines(width int) []string {
         "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
         "s              Toggle side-by-side / inline",
+        "w              Toggle line wrap (diff)",
         "r              Refresh now",
         "g / G          Top / Bottom",
         "q              Quit",
@@ -1720,17 +1731,28 @@ func (m model) rightBodyLinesAll(width int) []string {
             case diffview.RowMeta:
                 // skip
             default:
-                l := m.renderSideCell(r, "left", colsW)
-                rr := m.renderSideCell(r, "right", colsW)
-                // Apply horizontal slice to both cells (skip first X columns)
-                if m.rightXOffset > 0 {
-                    l = sliceANSI(l, m.rightXOffset, colsW)
-                    rr = sliceANSI(rr, m.rightXOffset, colsW)
-                    // pad after slicing to maintain exact cell widths
-                    l = padExact(l, colsW)
-                    rr = padExact(rr, colsW)
+                if m.wrapLines {
+                    lLines := m.renderSideCellWrap(r, "left", colsW)
+                    rLines := m.renderSideCellWrap(r, "right", colsW)
+                    n := len(lLines)
+                    if len(rLines) > n { n = len(rLines) }
+                    for i := 0; i < n; i++ {
+                        var l, rr string
+                        if i < len(lLines) { l = lLines[i] } else { l = strings.Repeat(" ", colsW) }
+                        if i < len(rLines) { rr = rLines[i] } else { rr = strings.Repeat(" ", colsW) }
+                        lines = append(lines, l+mid+rr)
+                    }
+                } else {
+                    l := m.renderSideCell(r, "left", colsW)
+                    rr := m.renderSideCell(r, "right", colsW)
+                    if m.rightXOffset > 0 {
+                        l = sliceANSI(l, m.rightXOffset, colsW)
+                        rr = sliceANSI(rr, m.rightXOffset, colsW)
+                        l = padExact(l, colsW)
+                        rr = padExact(rr, colsW)
+                    }
+                    lines = append(lines, l+mid+rr)
                 }
-                lines = append(lines, l+mid+rr)
             }
         }
     } else {
@@ -1739,39 +1761,66 @@ func (m model) rightBodyLinesAll(width int) []string {
             case diffview.RowHunk:
                 lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowContext:
-                line := "  "+r.Left
-                if m.rightXOffset > 0 {
-                    line = sliceANSI(line, m.rightXOffset, width)
-                    line = padExact(line, width)
+                base := "  "+r.Left
+                if m.wrapLines {
+                    wrapped := ansi.Hardwrap(base, width, false)
+                    lines = append(lines, strings.Split(wrapped, "\n")...)
+                } else {
+                    line := base
+                    if m.rightXOffset > 0 {
+                        line = sliceANSI(line, m.rightXOffset, width)
+                        line = padExact(line, width)
+                    }
+                    lines = append(lines, line)
                 }
-                lines = append(lines, line)
             case diffview.RowAdd:
-                line := m.theme.AddText("+ "+r.Right)
-                if m.rightXOffset > 0 {
-                    line = sliceANSI(line, m.rightXOffset, width)
-                    line = padExact(line, width)
+                base := m.theme.AddText("+ "+r.Right)
+                if m.wrapLines {
+                    wrapped := ansi.Hardwrap(base, width, false)
+                    lines = append(lines, strings.Split(wrapped, "\n")...)
+                } else {
+                    line := base
+                    if m.rightXOffset > 0 {
+                        line = sliceANSI(line, m.rightXOffset, width)
+                        line = padExact(line, width)
+                    }
+                    lines = append(lines, line)
                 }
-                lines = append(lines, line)
             case diffview.RowDel:
-                line := m.theme.DelText("- "+r.Left)
-                if m.rightXOffset > 0 {
-                    line = sliceANSI(line, m.rightXOffset, width)
-                    line = padExact(line, width)
+                base := m.theme.DelText("- "+r.Left)
+                if m.wrapLines {
+                    wrapped := ansi.Hardwrap(base, width, false)
+                    lines = append(lines, strings.Split(wrapped, "\n")...)
+                } else {
+                    line := base
+                    if m.rightXOffset > 0 {
+                        line = sliceANSI(line, m.rightXOffset, width)
+                        line = padExact(line, width)
+                    }
+                    lines = append(lines, line)
                 }
-                lines = append(lines, line)
             case diffview.RowReplace:
-                line1 := m.theme.DelText("- "+r.Left)
-                if m.rightXOffset > 0 {
-                    line1 = sliceANSI(line1, m.rightXOffset, width)
-                    line1 = padExact(line1, width)
+                base1 := m.theme.DelText("- "+r.Left)
+                base2 := m.theme.AddText("+ "+r.Right)
+                if m.wrapLines {
+                    wrapped1 := strings.Split(ansi.Hardwrap(base1, width, false), "\n")
+                    wrapped2 := strings.Split(ansi.Hardwrap(base2, width, false), "\n")
+                    lines = append(lines, wrapped1...)
+                    lines = append(lines, wrapped2...)
+                } else {
+                    line1 := base1
+                    if m.rightXOffset > 0 {
+                        line1 = sliceANSI(line1, m.rightXOffset, width)
+                        line1 = padExact(line1, width)
+                    }
+                    lines = append(lines, line1)
+                    line2 := base2
+                    if m.rightXOffset > 0 {
+                        line2 = sliceANSI(line2, m.rightXOffset, width)
+                        line2 = padExact(line2, width)
+                    }
+                    lines = append(lines, line2)
                 }
-                lines = append(lines, line1)
-                line2 := m.theme.AddText("+ "+r.Right)
-                if m.rightXOffset > 0 {
-                    line2 = sliceANSI(line2, m.rightXOffset, width)
-                    line2 = padExact(line2, width)
-                }
-                lines = append(lines, line2)
             }
         }
     }
@@ -2051,6 +2100,55 @@ func (m model) renderSideCell(r diffview.Row, side string, width int) string {
     }
     body := padExact(clipped, bodyW)
     return marker + " " + body
+}
+
+// renderSideCellWrap renders a cell like renderSideCell but wraps the content
+// to the given width and returns multiple visual lines. The marker is repeated
+// on each wrapped line.
+func (m model) renderSideCellWrap(r diffview.Row, side string, width int) []string {
+    marker := " "
+    content := ""
+    switch side {
+    case "left":
+        content = r.Left
+        switch r.Kind {
+        case diffview.RowContext:
+            marker = " "
+        case diffview.RowDel, diffview.RowReplace:
+            marker = m.theme.DelText("-")
+            content = m.theme.DelText(content)
+        case diffview.RowAdd:
+            marker = " "
+            content = ""
+        }
+    case "right":
+        content = r.Right
+        switch r.Kind {
+        case diffview.RowContext:
+            marker = " "
+        case diffview.RowAdd, diffview.RowReplace:
+            marker = m.theme.AddText("+")
+            content = m.theme.AddText(content)
+        case diffview.RowDel:
+            marker = " "
+            content = ""
+        }
+    }
+    // Reserve 2 cols for marker and a space
+    if width <= 2 {
+        return []string{ansi.Truncate(marker+" ", width, "")}
+    }
+    bodyW := width - 2
+    wrapped := ansi.Hardwrap(content, bodyW, false)
+    parts := strings.Split(wrapped, "\n")
+    out := make([]string, 0, len(parts))
+    for _, p := range parts {
+        out = append(out, marker+" "+padExact(p, bodyW))
+    }
+    if len(out) == 0 {
+        out = append(out, marker+" "+strings.Repeat(" ", bodyW))
+    }
+    return out
 }
 
 // sliceANSI returns a substring of s starting at visual column `start` with at most `w` columns, preserving ANSI escapes.
