@@ -235,3 +235,49 @@ func LastCommitSummary(repoRoot string) (string, error) {
     }
     return strings.TrimSpace(string(b)), nil
 }
+
+// FilesInLastCommit lists file paths modified in the last commit (HEAD) compared to its first parent.
+func FilesInLastCommit(repoRoot string) ([]string, error) {
+    // Ensure there is a parent commit
+    if err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "HEAD^").Run(); err != nil {
+        return nil, fmt.Errorf("no parent commit (cannot uncommit from initial commit): %w", err)
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+    b, err := cmd.Output()
+    if err != nil {
+        return nil, fmt.Errorf("git diff-tree: %w", err)
+    }
+    lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+    out := make([]string, 0, len(lines))
+    for _, l := range lines {
+        l = strings.TrimSpace(l)
+        if l != "" {
+            out = append(out, l)
+        }
+    }
+    sort.Strings(out)
+    return out, nil
+}
+
+// UncommitFiles removes the selected paths from the last commit by resetting
+// their index state to HEAD^ and amending the commit. Working tree is left
+// untouched so changes reappear as unstaged modifications.
+func UncommitFiles(repoRoot string, paths []string) error {
+    if len(paths) == 0 {
+        return nil
+    }
+    // Verify parent exists
+    if err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "HEAD^").Run(); err != nil {
+        return fmt.Errorf("cannot uncommit from initial commit: %w", err)
+    }
+    // Reset index for given paths to first parent
+    args := append([]string{"-C", repoRoot, "reset", "-q", "HEAD^", "--"}, paths...)
+    if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+        return fmt.Errorf("git reset HEAD^ -- <paths>: %w: %s", err, string(out))
+    }
+    // Amend commit without changing message
+    if out, err := exec.Command("git", "-C", repoRoot, "commit", "--amend", "--no-edit").CombinedOutput(); err != nil {
+        return fmt.Errorf("git commit --amend: %w: %s", err, string(out))
+    }
+    return nil
+}
