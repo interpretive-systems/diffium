@@ -28,6 +28,7 @@ type model struct {
     lastRefresh time.Time
     showHelp    bool
     leftWidth   int
+    leftOffset  int
     rightVP     viewport.Model
     // commit wizard state
     showCommit  bool
@@ -192,6 +193,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
             }
+        case "[":
+            // Page up left pane
+            vis := m.rightVP.Height
+            if vis <= 0 { vis = 10 }
+            step := vis - 1
+            if step < 1 { step = 1 }
+            newOffset := m.leftOffset - step
+            if newOffset < 0 { newOffset = 0 }
+            // Keep selection visible within new viewport
+            if m.selected < newOffset {
+                newOffset = m.selected
+            }
+            maxStart := len(m.files) - vis
+            if maxStart < 0 { maxStart = 0 }
+            if newOffset > maxStart { newOffset = maxStart }
+            m.leftOffset = newOffset
+            return m, m.recalcViewport()
+        case "]":
+            // Page down left pane
+            vis := m.rightVP.Height
+            if vis <= 0 { vis = 10 }
+            step := vis - 1
+            if step < 1 { step = 1 }
+            maxStart := len(m.files) - vis
+            if maxStart < 0 { maxStart = 0 }
+            newOffset := m.leftOffset + step
+            if newOffset > maxStart { newOffset = maxStart }
+            // Keep selection visible within new viewport
+            if m.selected >= newOffset+vis {
+                newOffset = m.selected - vis + 1
+                if newOffset < 0 { newOffset = 0 }
+            }
+            m.leftOffset = newOffset
+            return m, m.recalcViewport()
         case "r":
             return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentDiff(m))
         case "s":
@@ -459,7 +494,13 @@ func (m model) leftBodyLines(max int) []string {
         lines = append(lines, "No changes detected")
         return lines
     }
-    for i, f := range m.files {
+    start := m.leftOffset
+    if start < 0 { start = 0 }
+    if start > len(m.files) { start = len(m.files) }
+    end := start + max
+    if end > len(m.files) { end = len(m.files) }
+    for i := start; i < end; i++ {
+        f := m.files[i]
         marker := "  "
         if i == m.selected {
             marker = "> "
@@ -467,9 +508,6 @@ func (m model) leftBodyLines(max int) []string {
         status := fileStatusLabel(f)
         line := fmt.Sprintf("%s%s %s", marker, status, f.Path)
         lines = append(lines, line)
-        if len(lines) >= max {
-            break
-        }
     }
     return lines
 }
@@ -633,6 +671,7 @@ func (m model) viewHelp() string {
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
+        "[/]            Page left file list",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
         "g / G          Top / Bottom",
@@ -689,6 +728,23 @@ func (m *model) recalcViewport() tea.Cmd {
     if contentHeight < 1 {
         contentHeight = 1
     }
+    // Clamp leftOffset and keep selection visible in left pane
+    vis := contentHeight
+    if vis < 1 { vis = 1 }
+    if m.leftOffset < 0 { m.leftOffset = 0 }
+    maxStart := len(m.files) - vis
+    if maxStart < 0 { maxStart = 0 }
+    if m.leftOffset > maxStart { m.leftOffset = maxStart }
+    if len(m.files) > 0 {
+        if m.selected < m.leftOffset {
+            m.leftOffset = m.selected
+        } else if m.selected >= m.leftOffset+vis {
+            m.leftOffset = m.selected - vis + 1
+            if m.leftOffset < 0 { m.leftOffset = 0 }
+        }
+        if m.leftOffset > maxStart { m.leftOffset = maxStart }
+    }
+
     // Set dimensions
     m.rightVP.Width = rightW
     m.rightVP.Height = contentHeight
@@ -710,6 +766,7 @@ func (m model) helpOverlayLines(width int) []string {
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
+        "[/]            Page left file list",
         "u              Uncommit (open wizard)",
         "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
