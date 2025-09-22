@@ -30,6 +30,7 @@ type model struct {
     leftWidth   int
     leftOffset  int
     rightVP     viewport.Model
+    rightXOffset int
     // commit wizard state
     showCommit  bool
     commitStep  int // 0: select files, 1: message, 2: confirm/progress
@@ -262,6 +263,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "s":
             m.sideBySide = !m.sideBySide
             return m, m.recalcViewport()
+        // Horizontal scroll for right pane
+        case "left", "{":
+            if m.rightXOffset > 0 {
+                m.rightXOffset -= 4
+                if m.rightXOffset < 0 { m.rightXOffset = 0 }
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "right", "}":
+            m.rightXOffset += 4
+            return m, m.recalcViewport()
+        case "home":
+            if m.rightXOffset != 0 {
+                m.rightXOffset = 0
+                return m, m.recalcViewport()
+            }
+            return m, nil
         // Right pane scrolling
         case "pgdown":
             m.rightVP.PageDown()
@@ -749,6 +767,7 @@ func (m model) viewHelp() string {
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
         "[/]            Page left file list",
+        "{/}            Horizontal scroll (diff)",
         "b              Switch branch (open wizard)",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
@@ -849,6 +868,7 @@ func (m model) helpOverlayLines(width int) []string {
     keys := []string{
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
+        "{/}            Horizontal scroll (diff)",
         "</> or H/L      Adjust left pane width",
         "[/]            Page left file list",
         "b              Switch branch (open wizard)",
@@ -1629,13 +1649,21 @@ func (m model) rightBodyLinesAll(width int) []string {
         for _, r := range m.rows {
             switch r.Kind {
             case diffview.RowHunk:
-                // Show a subtle separator instead of raw @@ header
+                // subtle separator fills full width
                 lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowMeta:
                 // skip
             default:
                 l := m.renderSideCell(r, "left", colsW)
                 rr := m.renderSideCell(r, "right", colsW)
+                // Apply horizontal slice to both cells (skip first X columns)
+                if m.rightXOffset > 0 {
+                    l = sliceANSI(l, m.rightXOffset, colsW)
+                    rr = sliceANSI(rr, m.rightXOffset, colsW)
+                    // pad after slicing to maintain exact cell widths
+                    l = padExact(l, colsW)
+                    rr = padExact(rr, colsW)
+                }
                 lines = append(lines, l+mid+rr)
             }
         }
@@ -1645,14 +1673,39 @@ func (m model) rightBodyLinesAll(width int) []string {
             case diffview.RowHunk:
                 lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowContext:
-                lines = append(lines, "  "+r.Left)
+                line := "  "+r.Left
+                if m.rightXOffset > 0 {
+                    line = sliceANSI(line, m.rightXOffset, width)
+                    line = padExact(line, width)
+                }
+                lines = append(lines, line)
             case diffview.RowAdd:
-                lines = append(lines, m.theme.AddText("+ "+r.Right))
+                line := m.theme.AddText("+ "+r.Right)
+                if m.rightXOffset > 0 {
+                    line = sliceANSI(line, m.rightXOffset, width)
+                    line = padExact(line, width)
+                }
+                lines = append(lines, line)
             case diffview.RowDel:
-                lines = append(lines, m.theme.DelText("- "+r.Left))
+                line := m.theme.DelText("- "+r.Left)
+                if m.rightXOffset > 0 {
+                    line = sliceANSI(line, m.rightXOffset, width)
+                    line = padExact(line, width)
+                }
+                lines = append(lines, line)
             case diffview.RowReplace:
-                lines = append(lines, m.theme.DelText("- "+r.Left))
-                lines = append(lines, m.theme.AddText("+ "+r.Right))
+                line1 := m.theme.DelText("- "+r.Left)
+                if m.rightXOffset > 0 {
+                    line1 = sliceANSI(line1, m.rightXOffset, width)
+                    line1 = padExact(line1, width)
+                }
+                lines = append(lines, line1)
+                line2 := m.theme.AddText("+ "+r.Right)
+                if m.rightXOffset > 0 {
+                    line2 = sliceANSI(line2, m.rightXOffset, width)
+                    line2 = padExact(line2, width)
+                }
+                lines = append(lines, line2)
             }
         }
     }
@@ -1912,6 +1965,35 @@ func (m model) renderSideCell(r diffview.Row, side string, width int) string {
         return ansi.Truncate(marker+" ", width, "")
     }
     bodyW := width - 2
-    body := padToWidth(content, bodyW)
+    // First clip right side to avoid wrapping
+    clipped := clipToWidth(content, bodyW)
+    // Then apply horizontal slice if any
+    if m.rightXOffset > 0 {
+        clipped = sliceANSI(clipped, m.rightXOffset, bodyW)
+    }
+    body := padExact(clipped, bodyW)
     return marker + " " + body
+}
+
+// sliceANSI returns a substring of s starting at visual column `start` with at most `w` columns, preserving ANSI escapes.
+func sliceANSI(s string, start, w int) string {
+    if start <= 0 {
+        return ansi.Truncate(s, w, "")
+    }
+    // First keep only the left portion up to start+w, then drop the first `start` columns.
+    head := ansi.Truncate(s, start+w, "")
+    return ansi.TruncateLeft(head, w, "")
+}
+
+// clipToWidth trims the string to at most w cells without ellipsis.
+func clipToWidth(s string, w int) string {
+    if w <= 0 { return "" }
+    return ansi.Truncate(s, w, "")
+}
+
+// padExact pads s with spaces to exactly width w (ANSI-aware width).
+func padExact(s string, w int) string {
+    sw := lipgloss.Width(s)
+    if sw >= w { return s }
+    return s + strings.Repeat(" ", w-sw)
 }
