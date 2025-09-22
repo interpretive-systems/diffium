@@ -281,3 +281,65 @@ func UncommitFiles(repoRoot string, paths []string) error {
     }
     return nil
 }
+
+// CleanPreview runs a dry-run of git clean and returns the lines that would be removed.
+func CleanPreview(repoRoot string, includeIgnored bool) ([]string, error) {
+    args := []string{"-C", repoRoot, "clean", "-d", "-n"}
+    if includeIgnored {
+        args = append(args, "-x")
+    }
+    cmd := exec.Command("git", args...)
+    b, err := cmd.CombinedOutput()
+    if err != nil {
+        return nil, fmt.Errorf("git clean -n: %w: %s", err, string(b))
+    }
+    lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+    out := make([]string, 0, len(lines))
+    for _, l := range lines {
+        l = strings.TrimSpace(l)
+        if l != "" {
+            out = append(out, l)
+        }
+    }
+    return out, nil
+}
+
+// ResetHard performs `git reset --hard`.
+func ResetHard(repoRoot string) error {
+    cmd := exec.Command("git", "-C", repoRoot, "reset", "--hard")
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git reset --hard: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// Clean removes untracked files/dirs: `git clean -d -f` (+ -x if includeIgnored).
+func Clean(repoRoot string, includeIgnored bool) error {
+    args := []string{"-C", repoRoot, "clean", "-d", "-f"}
+    if includeIgnored {
+        args = append(args, "-x")
+    }
+    cmd := exec.Command("git", args...)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git clean -d -f: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// ResetAndClean executes reset and/or clean in order.
+func ResetAndClean(repoRoot string, doReset, doClean, includeIgnored bool) error {
+    if !doReset && !doClean {
+        return nil
+    }
+    if doReset {
+        if err := ResetHard(repoRoot); err != nil {
+            return err
+        }
+    }
+    if doClean {
+        if err := Clean(repoRoot, includeIgnored); err != nil {
+            return err
+        }
+    }
+    return nil
+}

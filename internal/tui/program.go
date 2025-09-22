@@ -51,6 +51,19 @@ type model struct {
     uncommitting   bool
     uncommitErr    string
     uncommitDone   bool
+
+    // reset/clean wizard state
+    showResetClean bool
+    rcStep         int // 0: select, 1: preview, 2: confirm (yellow), 3: confirm (red)
+    rcDoReset      bool
+    rcDoClean      bool
+    rcIncludeIgnored bool
+    rcIndex       int
+    rcPreviewLines []string // from git clean -dn
+    rcPreviewErr   string
+    rcRunning      bool
+    rcErr          string
+    rcDone         bool
 }
 
 // messages
@@ -101,6 +114,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showUncommit {
             return m.handleUncommitKeys(msg)
         }
+        if m.showResetClean {
+            return m.handleResetCleanKeys(msg)
+        }
         switch msg.String() {
         case "ctrl+c", "q":
             return m, tea.Quit
@@ -115,6 +131,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             // Open uncommit wizard
             m.openUncommitWizard()
             return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
+        case "R":
+            // Open reset/clean wizard
+            m.openResetCleanWizard()
+            return m, m.recalcViewport()
         case "<", "H":
             if m.leftWidth == 0 {
                 m.leftWidth = m.width / 3
@@ -259,6 +279,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.lastCommit = msg.summary
         }
         return m, nil
+    case rcPreviewMsg:
+        m.rcPreviewErr = ""
+        if msg.err != nil {
+            m.rcPreviewErr = msg.err.Error()
+            m.rcPreviewLines = nil
+        } else {
+            m.rcPreviewLines = msg.lines
+        }
+        return m, m.recalcViewport()
+    case rcResultMsg:
+        m.rcRunning = false
+        if msg.err != nil {
+            m.rcErr = msg.err.Error()
+            m.rcDone = false
+            return m, tea.Batch(loadFiles(m.repoRoot), m.recalcViewport())
+        }
+        m.rcErr = ""
+        m.rcDone = true
+        m.showResetClean = false
+        return m, tea.Batch(loadFiles(m.repoRoot), m.recalcViewport())
     case commitProgressMsg:
         m.committing = true
         m.commitErr = ""
@@ -351,6 +391,9 @@ func (m model) View() string {
     }
     if m.showUncommit {
         overlay = append(overlay, m.uncommitOverlayLines(m.width)...)
+    }
+    if m.showResetClean {
+        overlay = append(overlay, m.resetCleanOverlayLines(m.width)...)
     }
     overlayH := len(overlay)
 
@@ -639,6 +682,9 @@ func (m *model) recalcViewport() tea.Cmd {
     if m.showUncommit {
         overlayH += len(m.uncommitOverlayLines(m.width))
     }
+    if m.showResetClean {
+        overlayH += len(m.resetCleanOverlayLines(m.width))
+    }
     contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
@@ -665,6 +711,7 @@ func (m model) helpOverlayLines(width int) []string {
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
         "u              Uncommit (open wizard)",
+        "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
@@ -735,6 +782,228 @@ func (m model) commitOverlayLines(width int) []string {
 type uncommitFilesMsg struct {
     files []gitx.FileChange
     err   error
+}
+
+// --- Reset/Clean wizard ---
+
+type rcPreviewMsg struct{
+    lines []string
+    err error
+}
+
+type rcResultMsg struct{ err error }
+
+func (m *model) openResetCleanWizard() {
+    m.showResetClean = true
+    m.rcStep = 0
+    m.rcDoReset = false
+    m.rcDoClean = false
+    m.rcIncludeIgnored = false
+    m.rcIndex = 0
+    m.rcPreviewLines = nil
+    m.rcPreviewErr = ""
+    m.rcRunning = false
+    m.rcErr = ""
+    m.rcDone = false
+}
+
+func (m model) resetCleanOverlayLines(width int) []string {
+    if !m.showResetClean { return nil }
+    lines := make([]string, 0, 128)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.rcStep {
+    case 0: // select actions/options
+        title := lipgloss.NewStyle().Bold(true).Render("Reset/Clean — Select actions (space: toggle, a: toggle both, enter: continue, esc: cancel)")
+        lines = append(lines, title)
+        items := []struct{ label string; on bool }{
+            {"Reset working tree (git reset --hard)", m.rcDoReset},
+            {"Clean untracked (git clean -d -f)", m.rcDoClean},
+            {"Include ignored in clean (-x)", m.rcIncludeIgnored},
+        }
+        for i, it := range items {
+            cur := "  "
+            if i == m.rcIndex { cur = "> " }
+            lines = append(lines, fmt.Sprintf("%s%s %s", cur, checkbox(it.on), it.label))
+        }
+        lines = append(lines, lipgloss.NewStyle().Faint(true).Render("A preview will be shown before confirmation"))
+        if m.rcErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.rcErr)
+        }
+    case 1: // preview
+        title := lipgloss.NewStyle().Bold(true).Render("Reset/Clean — Preview (enter: continue, b: back, esc: cancel)")
+        lines = append(lines, title)
+        // Reset preview summary from current file list (tracked changes)
+        if m.rcDoReset {
+            tracked := 0
+            for _, f := range m.files {
+                if !f.Untracked && (f.Staged || f.Unstaged || f.Deleted) {
+                    tracked++
+                }
+            }
+            lines = append(lines, fmt.Sprintf("Reset would discard tracked changes for ~%d file(s)", tracked))
+        } else {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Reset: (not selected)"))
+        }
+        // Clean preview
+        if m.rcDoClean {
+            if m.rcPreviewErr != "" {
+                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Clean preview error: ")+m.rcPreviewErr)
+            } else if len(m.rcPreviewLines) == 0 {
+                lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Clean: nothing to remove"))
+            } else {
+                lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Clean would remove:"))
+                max := 10
+                for i, l := range m.rcPreviewLines {
+                    if i >= max { break }
+                    lines = append(lines, l)
+                }
+                if len(m.rcPreviewLines) > max {
+                    lines = append(lines, fmt.Sprintf("… and %d more", len(m.rcPreviewLines)-max))
+                }
+                if m.rcIncludeIgnored {
+                    lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(including ignored files)"))
+                }
+            }
+        } else {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Clean: (not selected)"))
+        }
+        // Show exact commands
+        var cmds []string
+        if m.rcDoReset { cmds = append(cmds, "git reset --hard") }
+        if m.rcDoClean {
+            c := "git clean -d -f"
+            if m.rcIncludeIgnored { c += " -x" }
+            cmds = append(cmds, c)
+        }
+        if len(cmds) > 0 {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Commands: "+strings.Join(cmds, "  &&  ")))
+        } else {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("No actions selected"))
+        }
+    case 2: // first (yellow) confirmation
+        title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Confirm — This will discard local changes (enter: continue, b: back, esc: cancel)")
+        lines = append(lines, title)
+        lines = append(lines, "Proceed to final confirmation?")
+    case 3: // final (red) confirmation
+        title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("FINAL CONFIRMATION — Destructive action (y/enter: execute, b: back, esc: cancel)")
+        lines = append(lines, title)
+        if m.rcRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Running…"))
+        }
+        if m.rcErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.rcErr)
+        }
+    }
+    return lines
+}
+
+func checkbox(on bool) string { if on { return "[x]" } ; return "[ ]" }
+
+func (m model) handleResetCleanKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.rcStep {
+    case 0: // select
+        switch key.String() {
+        case "esc":
+            m.showResetClean = false
+            return m, m.recalcViewport()
+        case "j", "down":
+            if m.rcIndex < 2 { m.rcIndex++ }
+            return m, nil
+        case "k", "up":
+            if m.rcIndex > 0 { m.rcIndex-- }
+            return m, nil
+        case " ":
+            switch m.rcIndex {
+            case 0:
+                m.rcDoReset = !m.rcDoReset
+            case 1:
+                m.rcDoClean = !m.rcDoClean
+            case 2:
+                m.rcIncludeIgnored = !m.rcIncludeIgnored
+            }
+            return m, nil
+        case "a":
+            both := m.rcDoReset && m.rcDoClean
+            m.rcDoReset = !both
+            m.rcDoClean = !both
+            return m, nil
+        case "enter":
+            if !m.rcDoReset && !m.rcDoClean {
+                m.rcErr = "no actions selected"
+                return m, m.recalcViewport()
+            }
+            m.rcStep = 1
+            m.rcPreviewErr = ""
+            m.rcPreviewLines = nil
+            if m.rcDoClean {
+                return m, loadRCPreview(m.repoRoot, m.rcIncludeIgnored)
+            }
+            return m, m.recalcViewport()
+        }
+    case 1: // preview
+        switch key.String() {
+        case "esc":
+            m.showResetClean = false
+            return m, m.recalcViewport()
+        case "b":
+            m.rcStep = 0
+            return m, m.recalcViewport()
+        case "enter":
+            m.rcStep = 2
+            return m, m.recalcViewport()
+        }
+    case 2: // yellow confirm
+        switch key.String() {
+        case "esc":
+            m.showResetClean = false
+            return m, m.recalcViewport()
+        case "b":
+            m.rcStep = 1
+            return m, m.recalcViewport()
+        case "enter":
+            m.rcStep = 3
+            return m, m.recalcViewport()
+        }
+    case 3: // red confirm
+        switch key.String() {
+        case "esc":
+            if !m.rcRunning {
+                m.showResetClean = false
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "b":
+            if !m.rcRunning {
+                m.rcStep = 2
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "y", "enter":
+            if !m.rcRunning && !m.rcDone {
+                m.rcRunning = true
+                m.rcErr = ""
+                return m, runResetClean(m.repoRoot, m.rcDoReset, m.rcDoClean, m.rcIncludeIgnored)
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func loadRCPreview(repoRoot string, includeIgnored bool) tea.Cmd {
+    return func() tea.Msg {
+        lines, err := gitx.CleanPreview(repoRoot, includeIgnored)
+        return rcPreviewMsg{lines: lines, err: err}
+    }
+}
+
+func runResetClean(repoRoot string, doReset, doClean bool, includeIgnored bool) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.ResetAndClean(repoRoot, doReset, doClean, includeIgnored); err != nil {
+            return rcResultMsg{err: err}
+        }
+        return rcResultMsg{err: nil}
+    }
 }
 
 type uncommitResultMsg struct{ err error }
