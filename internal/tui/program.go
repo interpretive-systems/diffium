@@ -13,6 +13,7 @@ import (
     "github.com/charmbracelet/x/ansi"
     "github.com/interpretive-systems/diffium/internal/diffview"
     "github.com/interpretive-systems/diffium/internal/gitx"
+    "github.com/interpretive-systems/diffium/internal/prefs"
 )
 
 type model struct {
@@ -28,6 +29,7 @@ type model struct {
     lastRefresh time.Time
     showHelp    bool
     leftWidth   int
+    savedLeftWidth int
     leftOffset  int
     rightVP     viewport.Model
     rightXOffset int
@@ -114,7 +116,7 @@ func Run(repoRoot string) error {
 }
 
 func (m model) Init() tea.Cmd {
-    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), tickOnce())
+    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), loadPrefs(m.repoRoot), tickOnce())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -178,6 +180,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if m.leftWidth < 20 {
                 m.leftWidth = 20
             }
+            _ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
             return m, m.recalcViewport()
         case ">", "L":
             if m.leftWidth == 0 {
@@ -191,6 +194,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if m.leftWidth > maxLeft {
                 m.leftWidth = maxLeft
             }
+            _ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
             return m, m.recalcViewport()
         case "j", "down":
             if len(m.files) == 0 {
@@ -265,6 +269,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentDiff(m))
         case "s":
             m.sideBySide = !m.sideBySide
+            _ = prefs.SaveSideBySide(m.repoRoot, m.sideBySide)
             return m, m.recalcViewport()
         case "w":
             // Toggle wrap in diff pane
@@ -272,6 +277,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if m.wrapLines {
                 m.rightXOffset = 0
             }
+            _ = prefs.SaveWrap(m.repoRoot, m.wrapLines)
             return m, m.recalcViewport()
         // Horizontal scroll for right pane
         case "left", "{":
@@ -317,10 +323,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.height = msg.Height
         if m.leftWidth == 0 {
             // Initialize left width once
-            m.leftWidth = m.width / 3
+            if m.savedLeftWidth > 0 {
+                m.leftWidth = m.savedLeftWidth
+            } else {
+                m.leftWidth = m.width / 3
+            }
             if m.leftWidth < 24 {
                 m.leftWidth = 24
             }
+            // Also ensure it doesn't exceed available
+            maxLeft := m.width - 20
+            if maxLeft < 20 { maxLeft = 20 }
+            if m.leftWidth > maxLeft { m.leftWidth = maxLeft }
         }
         return m, m.recalcViewport()
     case tickMsg:
@@ -377,6 +391,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case currentBranchMsg:
         if msg.err == nil {
             m.currentBranch = msg.name
+        }
+        return m, nil
+    case prefsMsg:
+        if msg.err == nil {
+            if msg.p.SideSet { m.sideBySide = msg.p.SideBySide }
+            if msg.p.WrapSet { m.wrapLines = msg.p.Wrap; if m.wrapLines { m.rightXOffset = 0 } }
+            if msg.p.LeftSet { m.savedLeftWidth = msg.p.LeftWidth }
         }
         return m, nil
     case pullResultMsg:
@@ -1850,6 +1871,19 @@ func loadCurrentBranch(repoRoot string) tea.Cmd {
     return func() tea.Msg {
         name, err := gitx.CurrentBranch(repoRoot)
         return currentBranchMsg{name: name, err: err}
+    }
+}
+
+type prefsMsg struct{
+    p   prefs.Prefs
+    err error
+}
+
+func loadPrefs(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        // Loading never errors for now; returns zero-vals on missing keys
+        p := prefs.Load(repoRoot)
+        return prefsMsg{p: p, err: nil}
     }
 }
 
