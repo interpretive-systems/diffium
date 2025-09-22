@@ -43,6 +43,7 @@ type model struct {
     commitErr   string
     commitDone  bool
     lastCommit  string
+    currentBranch string
     // uncommit wizard state
     showUncommit   bool
     ucStep         int // 0: select files, 1: confirm/progress
@@ -111,7 +112,7 @@ func Run(repoRoot string) error {
 }
 
 func (m model) Init() tea.Cmd {
-    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), tickOnce())
+    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), tickOnce())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -313,7 +314,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         return m, m.recalcViewport()
     case tickMsg:
         // Periodic refresh
-        return m, tea.Batch(loadFiles(m.repoRoot), tickOnce())
+        return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentBranch(m.repoRoot), tickOnce())
     case filesMsg:
         if msg.err != nil {
             m.status = fmt.Sprintf("status error: %v", msg.err)
@@ -362,6 +363,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.lastCommit = msg.summary
         }
         return m, nil
+    case currentBranchMsg:
+        if msg.err == nil {
+            m.currentBranch = msg.name
+        }
+        return m, nil
     case pullResultMsg:
         m.plRunning = false
         if msg.err != nil {
@@ -373,7 +379,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.plDone = true
         m.showPull = false
         // Refresh repo state after pull
-        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
     case branchListMsg:
         if msg.err != nil {
             m.brErr = msg.err.Error()
@@ -402,7 +408,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.brDone = true
         m.showBranch = false
         // refresh files after checkout
-        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
     case rcPreviewMsg:
         m.rcPreviewErr = ""
         if msg.err != nil {
@@ -500,8 +506,27 @@ func (m model) View() string {
     }
     sep := m.theme.DividerText("│")
 
-    // Row 1: top bar
-    top := "Changes | " + m.topRightTitle()
+    // Row 1: top bar with right-aligned current branch
+    leftTop := "Changes | " + m.topRightTitle()
+    rightTop := m.currentBranch
+    if rightTop != "" {
+        rightTop = lipgloss.NewStyle().Faint(true).Render(rightTop)
+    }
+    // Compose with right part visible and left truncated if needed
+    {
+        rightW := lipgloss.Width(rightTop)
+        if rightW >= m.width {
+            leftTop = ansi.Truncate(rightTop, m.width, "…")
+        } else {
+            avail := m.width - rightW - 1
+            if lipgloss.Width(leftTop) > avail {
+                leftTop = ansi.Truncate(leftTop, avail, "…")
+            } else if lipgloss.Width(leftTop) < avail {
+                leftTop = leftTop + strings.Repeat(" ", avail-lipgloss.Width(leftTop))
+            }
+            leftTop = leftTop + " " + rightTop
+        }
+    }
     // Row 2: horizontal rule
     hr := m.theme.DividerText(strings.Repeat("─", m.width))
 
@@ -542,7 +567,7 @@ func (m model) View() string {
     maxLines := contentHeight
 
     var b strings.Builder
-    b.WriteString(top)
+    b.WriteString(leftTop)
     b.WriteByte('\n')
     b.WriteString(hr)
     b.WriteByte('\n')
@@ -1723,6 +1748,18 @@ func loadLastCommit(repoRoot string) tea.Cmd {
     return func() tea.Msg {
         s, err := gitx.LastCommitSummary(repoRoot)
         return lastCommitMsg{summary: s, err: err}
+    }
+}
+
+type currentBranchMsg struct{
+    name string
+    err error
+}
+
+func loadCurrentBranch(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        name, err := gitx.CurrentBranch(repoRoot)
+        return currentBranchMsg{name: name, err: err}
     }
 }
 

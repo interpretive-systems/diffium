@@ -404,3 +404,13 @@ func Pull(repoRoot string) error {
     }
     return nil
 }
+
+// CurrentBranch returns the current branch name (or "HEAD" if detached).
+func CurrentBranch(repoRoot string) (string, error) {
+    cmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+    b, err := cmd.Output()
+    if err != nil {
+        return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %w", err)
+    }
+    return strings.TrimSpace(string(b)), nil
+}
