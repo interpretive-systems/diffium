@@ -397,7 +397,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if msg.err == nil {
             if msg.p.SideSet { m.sideBySide = msg.p.SideBySide }
             if msg.p.WrapSet { m.wrapLines = msg.p.Wrap; if m.wrapLines { m.rightXOffset = 0 } }
-            if msg.p.LeftSet { m.savedLeftWidth = msg.p.LeftWidth }
+            if msg.p.LeftSet {
+                m.savedLeftWidth = msg.p.LeftWidth
+                // If we already know the window size, apply immediately.
+                if m.width > 0 {
+                    lw := m.savedLeftWidth
+                    if lw < 24 { lw = 24 }
+                    maxLeft := m.width - 20
+                    if maxLeft < 20 { maxLeft = 20 }
+                    if lw > maxLeft { lw = maxLeft }
+                    m.leftWidth = lw
+                    return m, m.recalcViewport()
+                }
+            }
         }
         return m, nil
     case pullResultMsg:
