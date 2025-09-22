@@ -65,6 +65,16 @@ type model struct {
     rcRunning      bool
     rcErr          string
     rcDone         bool
+
+    // branch switch wizard
+    showBranch   bool
+    brStep       int // 0: list, 1: confirm/progress
+    brBranches   []string
+    brCurrent    string
+    brIndex      int
+    brRunning    bool
+    brErr        string
+    brDone       bool
 }
 
 // messages
@@ -118,6 +128,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showResetClean {
             return m.handleResetCleanKeys(msg)
         }
+        if m.showBranch {
+            return m.handleBranchKeys(msg)
+        }
         switch msg.String() {
         case "ctrl+c", "q":
             return m, tea.Quit
@@ -132,6 +145,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             // Open uncommit wizard
             m.openUncommitWizard()
             return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
+        case "b":
+            m.openBranchWizard()
+            return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
         case "R":
             // Open reset/clean wizard
             m.openResetCleanWizard()
@@ -314,6 +330,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.lastCommit = msg.summary
         }
         return m, nil
+    case branchListMsg:
+        if msg.err != nil {
+            m.brErr = msg.err.Error()
+            m.brBranches = nil
+            m.brCurrent = ""
+            m.brIndex = 0
+            return m, m.recalcViewport()
+        }
+        m.brBranches = msg.names
+        m.brCurrent = msg.current
+        m.brErr = ""
+        // Focus current if present
+        m.brIndex = 0
+        for i, n := range m.brBranches {
+            if n == m.brCurrent { m.brIndex = i; break }
+        }
+        return m, m.recalcViewport()
+    case branchResultMsg:
+        m.brRunning = false
+        if msg.err != nil {
+            m.brErr = msg.err.Error()
+            m.brDone = false
+            return m, m.recalcViewport()
+        }
+        m.brErr = ""
+        m.brDone = true
+        m.showBranch = false
+        // refresh files after checkout
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
     case rcPreviewMsg:
         m.rcPreviewErr = ""
         if msg.err != nil {
@@ -429,6 +474,9 @@ func (m model) View() string {
     }
     if m.showResetClean {
         overlay = append(overlay, m.resetCleanOverlayLines(m.width)...)
+    }
+    if m.showBranch {
+        overlay = append(overlay, m.branchOverlayLines(m.width)...)
     }
     overlayH := len(overlay)
 
@@ -672,6 +720,7 @@ func (m model) viewHelp() string {
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
         "[/]            Page left file list",
+        "b              Switch branch (open wizard)",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
         "g / G          Top / Bottom",
@@ -724,6 +773,9 @@ func (m *model) recalcViewport() tea.Cmd {
     if m.showResetClean {
         overlayH += len(m.resetCleanOverlayLines(m.width))
     }
+    if m.showBranch {
+        overlayH += len(m.branchOverlayLines(m.width))
+    }
     contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
@@ -767,6 +819,7 @@ func (m model) helpOverlayLines(width int) []string {
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
         "[/]            Page left file list",
+        "b              Switch branch (open wizard)",
         "u              Uncommit (open wizard)",
         "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
@@ -846,6 +899,126 @@ type uncommitFilesMsg struct {
 type rcPreviewMsg struct{
     lines []string
     err error
+}
+
+// --- Branch switch wizard ---
+
+type branchListMsg struct{
+    names   []string
+    current string
+    err     error
+}
+
+type branchResultMsg struct{ err error }
+
+func loadBranches(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        names, current, err := gitx.ListBranches(repoRoot)
+        return branchListMsg{names: names, current: current, err: err}
+    }
+}
+
+func (m *model) openBranchWizard() {
+    m.showBranch = true
+    m.brStep = 0
+    m.brBranches = nil
+    m.brCurrent = ""
+    m.brIndex = 0
+    m.brRunning = false
+    m.brErr = ""
+    m.brDone = false
+}
+
+func (m model) branchOverlayLines(width int) []string {
+    if !m.showBranch { return nil }
+    lines := make([]string, 0, 128)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.brStep {
+    case 0:
+        title := lipgloss.NewStyle().Bold(true).Render("Branches — Select (enter: continue, esc: cancel)")
+        lines = append(lines, title)
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+        if len(m.brBranches) == 0 && m.brErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Loading branches…"))
+            return lines
+        }
+        for i, n := range m.brBranches {
+            cur := "  "
+            if i == m.brIndex { cur = "> " }
+            mark := "   "
+            if n == m.brCurrent { mark = "[*]" }
+            lines = append(lines, fmt.Sprintf("%s%s %s", cur, mark, n))
+        }
+        lines = append(lines, lipgloss.NewStyle().Faint(true).Render("[*] current branch"))
+    case 1:
+        title := lipgloss.NewStyle().Bold(true).Render("Checkout — Confirm (y/enter: checkout, b: back, esc: cancel)")
+        lines = append(lines, title)
+        if len(m.brBranches) > 0 {
+            name := m.brBranches[m.brIndex]
+            lines = append(lines, fmt.Sprintf("Branch: %s", name))
+        }
+        if m.brRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Checking out…"))
+        }
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+    }
+    return lines
+}
+
+func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.brStep {
+    case 0:
+        switch key.String() {
+        case "esc":
+            m.showBranch = false
+            return m, m.recalcViewport()
+        case "j", "down":
+            if len(m.brBranches) > 0 && m.brIndex < len(m.brBranches)-1 { m.brIndex++ }
+            return m, nil
+        case "k", "up":
+            if m.brIndex > 0 { m.brIndex-- }
+            return m, nil
+        case "enter":
+            if len(m.brBranches) == 0 { return m, nil }
+            m.brStep = 1
+            m.brErr = ""
+            m.brDone = false
+            m.brRunning = false
+            return m, m.recalcViewport()
+        }
+    case 1:
+        switch key.String() {
+        case "esc":
+            if !m.brRunning { m.showBranch = false; return m, m.recalcViewport() }
+            return m, nil
+        case "b":
+            if !m.brRunning && !m.brDone { m.brStep = 0; return m, m.recalcViewport() }
+            return m, nil
+        case "y", "enter":
+            if !m.brRunning && !m.brDone {
+                if len(m.brBranches) == 0 { return m, nil }
+                name := m.brBranches[m.brIndex]
+                m.brRunning = true
+                m.brErr = ""
+                return m, runCheckout(m.repoRoot, name)
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func runCheckout(repoRoot, branch string) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.Checkout(repoRoot, branch); err != nil {
+            return branchResultMsg{err: err}
+        }
+        return branchResultMsg{err: nil}
+    }
 }
 
 type rcResultMsg struct{ err error }
