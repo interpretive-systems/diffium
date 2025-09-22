@@ -343,3 +343,43 @@ func ResetAndClean(repoRoot string, doReset, doClean, includeIgnored bool) error
     }
     return nil
 }
+
+// ListBranches returns local branch names and the current branch name.
+func ListBranches(repoRoot string) ([]string, string, error) {
+    // Current branch (may be "HEAD" if detached)
+    curCmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+    bcur, err := curCmd.Output()
+    if err != nil {
+        return nil, "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %w", err)
+    }
+    current := strings.TrimSpace(string(bcur))
+
+    // Local branches
+    listCmd := exec.Command("git", "-C", repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    blist, err := listCmd.Output()
+    if err != nil {
+        return nil, "", fmt.Errorf("git for-each-ref: %w", err)
+    }
+    lines := strings.Split(strings.TrimRight(string(blist), "\n"), "\n")
+    out := make([]string, 0, len(lines))
+    for _, l := range lines {
+        l = strings.TrimSpace(l)
+        if l != "" {
+            out = append(out, l)
+        }
+    }
+    sort.Strings(out)
+    return out, current, nil
+}
+
+// Checkout switches branches using `git checkout <branch>`.
+func Checkout(repoRoot, branch string) error {
+    if strings.TrimSpace(branch) == "" {
+        return errors.New("empty branch name")
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "checkout", branch)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git checkout %s: %w: %s", branch, err, string(out))
+    }
+    return nil
+}
