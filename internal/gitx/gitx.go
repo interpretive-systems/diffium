@@ -398,11 +398,18 @@ func CheckoutNew(repoRoot, name string) error {
 
 // Pull runs `git pull` in the repository.
 func Pull(repoRoot string) error {
+    _, err := PullWithOutput(repoRoot)
+    return err
+}
+
+// PullWithOutput runs `git pull` and returns the raw CLI output.
+func PullWithOutput(repoRoot string) (string, error) {
     cmd := exec.Command("git", "-C", repoRoot, "pull")
-    if out, err := cmd.CombinedOutput(); err != nil {
-        return fmt.Errorf("git pull: %w: %s", err, string(out))
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        return string(out), fmt.Errorf("git pull: %w: %s", err, string(out))
     }
-    return nil
+    return string(out), nil
 }
 
 // CurrentBranch returns the current branch name (or "HEAD" if detached).

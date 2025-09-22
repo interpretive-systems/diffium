@@ -85,6 +85,7 @@ type model struct {
     plRunning  bool
     plErr      string
     plDone     bool
+    plOutput   string
 }
 
 // messages
@@ -370,14 +371,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         return m, nil
     case pullResultMsg:
         m.plRunning = false
+        // Always show result output in overlay; close with enter/esc
+        m.plOutput = msg.out
         if msg.err != nil {
             m.plErr = msg.err.Error()
-            m.plDone = false
-            return m, m.recalcViewport()
+        } else {
+            m.plErr = ""
         }
-        m.plErr = ""
         m.plDone = true
-        m.showPull = false
+        m.showPull = true
         // Refresh repo state after pull
         return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
     case branchListMsg:
@@ -989,26 +991,49 @@ type branchListMsg struct{
 
 // --- Pull wizard ---
 
-type pullResultMsg struct{ err error }
+type pullResultMsg struct{ out string; err error }
 
 func (m *model) openPullWizard() {
     m.showPull = true
     m.plRunning = false
     m.plErr = ""
     m.plDone = false
+    m.plOutput = ""
 }
 
 func (m model) pullOverlayLines(width int) []string {
     if !m.showPull { return nil }
     lines := make([]string, 0, 32)
     lines = append(lines, strings.Repeat("─", width))
-    title := lipgloss.NewStyle().Bold(true).Render("Pull — Confirm (y/enter: pull, esc: cancel)")
-    lines = append(lines, title)
-    if m.plRunning {
-        lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Pulling…"))
-    }
-    if m.plErr != "" {
-        lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.plErr)
+    if m.plDone {
+        title := lipgloss.NewStyle().Bold(true).Render("Pull — Result (enter/esc: close)")
+        lines = append(lines, title)
+        if m.plErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.plErr)
+        }
+        if m.plOutput != "" {
+            // Show up to 12 lines of output
+            outLines := strings.Split(strings.TrimRight(m.plOutput, "\n"), "\n")
+            max := 12
+            for i, l := range outLines {
+                if i >= max { break }
+                lines = append(lines, l)
+            }
+            if len(outLines) > max {
+                lines = append(lines, fmt.Sprintf("… and %d more", len(outLines)-max))
+            }
+        } else if m.plErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(no output)"))
+        }
+    } else {
+        title := lipgloss.NewStyle().Bold(true).Render("Pull — Confirm (y/enter: pull, esc: cancel)")
+        lines = append(lines, title)
+        if m.plRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Pulling…"))
+        }
+        if m.plErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.plErr)
+        }
     }
     return lines
 }
@@ -1016,9 +1041,24 @@ func (m model) pullOverlayLines(width int) []string {
 func (m model) handlePullKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
     switch key.String() {
     case "esc":
+        if m.plDone && !m.plRunning {
+            m.showPull = false
+            m.plDone = false
+            m.plOutput = ""
+            m.plErr = ""
+            return m, m.recalcViewport()
+        }
         if !m.plRunning { m.showPull = false; return m, m.recalcViewport() }
         return m, nil
     case "y", "enter":
+        if m.plDone && !m.plRunning {
+            // Close results view
+            m.showPull = false
+            m.plDone = false
+            m.plOutput = ""
+            m.plErr = ""
+            return m, m.recalcViewport()
+        }
         if !m.plRunning && !m.plDone {
             m.plRunning = true
             m.plErr = ""
@@ -1031,10 +1071,11 @@ func (m model) handlePullKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func runPull(repoRoot string) tea.Cmd {
     return func() tea.Msg {
-        if err := gitx.Pull(repoRoot); err != nil {
-            return pullResultMsg{err: err}
+        out, err := gitx.PullWithOutput(repoRoot)
+        if err != nil {
+            return pullResultMsg{out: out, err: err}
         }
-        return pullResultMsg{err: nil}
+        return pullResultMsg{out: out, err: nil}
     }
 }
 
