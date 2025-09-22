@@ -77,6 +77,12 @@ type model struct {
     brDone       bool
     brInput      textinput.Model
     brInputActive bool
+
+    // pull wizard
+    showPull   bool
+    plRunning  bool
+    plErr      string
+    plDone     bool
 }
 
 // messages
@@ -133,6 +139,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showBranch {
             return m.handleBranchKeys(msg)
         }
+        if m.showPull {
+            return m.handlePullKeys(msg)
+        }
         switch msg.String() {
         case "ctrl+c", "q":
             return m, tea.Quit
@@ -150,6 +159,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "b":
             m.openBranchWizard()
             return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
+        case "p":
+            m.openPullWizard()
+            return m, m.recalcViewport()
         case "R":
             // Open reset/clean wizard
             m.openResetCleanWizard()
@@ -332,6 +344,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.lastCommit = msg.summary
         }
         return m, nil
+    case pullResultMsg:
+        m.plRunning = false
+        if msg.err != nil {
+            m.plErr = msg.err.Error()
+            m.plDone = false
+            return m, m.recalcViewport()
+        }
+        m.plErr = ""
+        m.plDone = true
+        m.showPull = false
+        // Refresh repo state after pull
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
     case branchListMsg:
         if msg.err != nil {
             m.brErr = msg.err.Error()
@@ -479,6 +503,9 @@ func (m model) View() string {
     }
     if m.showBranch {
         overlay = append(overlay, m.branchOverlayLines(m.width)...)
+    }
+    if m.showPull {
+        overlay = append(overlay, m.pullOverlayLines(m.width)...)
     }
     overlayH := len(overlay)
 
@@ -778,6 +805,9 @@ func (m *model) recalcViewport() tea.Cmd {
     if m.showBranch {
         overlayH += len(m.branchOverlayLines(m.width))
     }
+    if m.showPull {
+        overlayH += len(m.pullOverlayLines(m.width))
+    }
     contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
@@ -822,6 +852,7 @@ func (m model) helpOverlayLines(width int) []string {
         "</> or H/L      Adjust left pane width",
         "[/]            Page left file list",
         "b              Switch branch (open wizard)",
+        "p              Pull (open wizard)",
         "u              Uncommit (open wizard)",
         "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
@@ -909,6 +940,57 @@ type branchListMsg struct{
     names   []string
     current string
     err     error
+}
+
+// --- Pull wizard ---
+
+type pullResultMsg struct{ err error }
+
+func (m *model) openPullWizard() {
+    m.showPull = true
+    m.plRunning = false
+    m.plErr = ""
+    m.plDone = false
+}
+
+func (m model) pullOverlayLines(width int) []string {
+    if !m.showPull { return nil }
+    lines := make([]string, 0, 32)
+    lines = append(lines, strings.Repeat("─", width))
+    title := lipgloss.NewStyle().Bold(true).Render("Pull — Confirm (y/enter: pull, esc: cancel)")
+    lines = append(lines, title)
+    if m.plRunning {
+        lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Pulling…"))
+    }
+    if m.plErr != "" {
+        lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.plErr)
+    }
+    return lines
+}
+
+func (m model) handlePullKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch key.String() {
+    case "esc":
+        if !m.plRunning { m.showPull = false; return m, m.recalcViewport() }
+        return m, nil
+    case "y", "enter":
+        if !m.plRunning && !m.plDone {
+            m.plRunning = true
+            m.plErr = ""
+            return m, runPull(m.repoRoot)
+        }
+        return m, nil
+    }
+    return m, nil
+}
+
+func runPull(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.Pull(repoRoot); err != nil {
+            return pullResultMsg{err: err}
+        }
+        return pullResultMsg{err: nil}
+    }
 }
 
 type branchResultMsg struct{ err error }

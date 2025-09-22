@@ -395,3 +395,12 @@ func CheckoutNew(repoRoot, name string) error {
     }
     return nil
 }
+
+// Pull runs `git pull` in the repository.
+func Pull(repoRoot string) error {
+    cmd := exec.Command("git", "-C", repoRoot, "pull")
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git pull: %w: %s", err, string(out))
+    }
+    return nil
+}
