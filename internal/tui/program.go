@@ -16,6 +16,15 @@ import (
     "github.com/interpretive-systems/diffium/internal/gitx"
 )
 
+const (
+    // Normal match: black on bright white
+    searchMatchStartSeq        = "\x1b[30;107m"
+    // Current match: black on yellow
+    searchCurrentMatchStartSeq = "\x1b[30;43m"
+    // Reset all styles
+    searchMatchEndSeq          = "\x1b[0m"
+)
+
 type model struct {
     repoRoot    string
     theme       Theme
@@ -755,55 +764,7 @@ func (m model) rightBodyLinesAll(width int) []string {
         }
     }
     return lines
-    lines := make([]string, 0, 1024)
-    if len(m.files) == 0 {
-        return lines
-    }
-    if m.files[m.selected].Binary {
-        lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(Binary file; no text diff)"))
-        return lines
-    }
-    if m.rows == nil {
-        lines = append(lines, "Loading diff…")
-        return lines
-    }
-    if m.sideBySide {
-        colsW := (width - 1) / 2
-        if colsW < 10 {
-            colsW = 10
-        }
-        mid := m.theme.DividerText("│")
-        for _, r := range m.rows {
-            switch r.Kind {
-            case diffview.RowHunk:
-                // Show a subtle separator instead of raw @@ header
-                lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
-            case diffview.RowMeta:
-                // skip
-            default:
-                l := m.renderSideCell(r, "left", colsW)
-                rr := m.renderSideCell(r, "right", colsW)
-                lines = append(lines, l+mid+rr)
-            }
-        }
-    } else {
-        for _, r := range m.rows {
-            switch r.Kind {
-            case diffview.RowHunk:
-                lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
-            case diffview.RowContext:
-                lines = append(lines, "  "+r.Left)
-            case diffview.RowAdd:
-                lines = append(lines, m.theme.AddText("+ "+r.Right))
-            case diffview.RowDel:
-                lines = append(lines, m.theme.DelText("- "+r.Left))
-            case diffview.RowReplace:
-                lines = append(lines, m.theme.DelText("- "+r.Left))
-                lines = append(lines, m.theme.AddText("+ "+r.Right))
-            }
-        }
-    }
-    return lines
+    
 }
 
 func (m *model) openSearch() {
