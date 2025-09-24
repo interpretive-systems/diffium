@@ -4,6 +4,7 @@ import (
     "fmt"
     "sort"
     "strings"
+	"strconv"
     "time"
 	"unicode/utf8"
 
@@ -39,7 +40,11 @@ type model struct {
     showHelp    bool
     leftWidth   int
     rightVP     viewport.Model
+
 	rightContent []string
+
+	keyBuffer   string
+
     // commit wizard state
     showCommit  bool
     commitStep  int // 0: select files, 1: message, 2: confirm/progress
@@ -109,7 +114,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showCommit {
             return m.handleCommitKeys(msg)
         }
-        switch msg.String() {
+
+		key := msg.String()
+
+		if isNumericKey(key){
+			m.keyBuffer += key
+			return m, nil
+		}
+
+		if !isNumericKey(key) && !isMovementKey(key){
+			m.keyBuffer = ""
+		}
+
+        switch key {
         case "ctrl+c", "q":
             return m, tea.Quit
         case "h":
@@ -151,7 +168,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 return m, nil
             }
             if m.selected < len(m.files)-1 {
-                m.selected++
+				if(m.keyBuffer == ""){
+					m.selected++
+				}else{
+					jump, err := strconv.Atoi(m.keyBuffer)
+					if err != nil{
+						m.selected++
+					} else {
+						m.selected += jump
+						m.selected = min(m.selected, len(m.files) - 1)
+					}
+					m.keyBuffer = ""
+				}
                 m.rows = nil
                 // Reset scroll for new file
                 m.rightVP.GotoTop()
@@ -159,10 +187,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
         case "k", "up":
             if len(m.files) == 0 {
-                return m, nil
+				m.keyBuffer = ""
             }
-            if m.selected > 0 {
-                m.selected--
+			if m.selected > 0 {
+				if(m.keyBuffer == ""){
+					m.selected--
+				}else{
+					jump, err := strconv.Atoi(m.keyBuffer)
+					if err != nil{
+						m.selected--
+					} else {
+						m.selected -= jump
+						m.selected = max(m.selected, 0)
+					}
+					m.keyBuffer = ""
+				}
                 m.rows = nil
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
@@ -474,7 +513,10 @@ func (m model) topRightTitle() string {
 }
 
 func (m model) bottomBar() string {
-    leftText := "h: help"
+	leftText := "h: help"
+	if m.keyBuffer != ""{
+		leftText = m.keyBuffer
+	}
     if m.lastCommit != "" {
         leftText += "  |  last: " + m.lastCommit
     }
@@ -1365,4 +1407,12 @@ func (m model) renderSideCell(r diffview.Row, side string, width int) string {
     bodyW := width - 2
     body := padToWidth(content, bodyW)
     return marker + " " + body
+}
+
+func isMovementKey(key string) bool{
+	return key == "j" || key == "k"
+}
+
+func isNumericKey(key string) bool{
+	return key <= "9" && key >= "0"
 }
