@@ -4,7 +4,9 @@ import (
     "fmt"
     "sort"
     "strings"
+	"strconv"
     "time"
+	"unicode/utf8"
 
     "github.com/charmbracelet/bubbles/textinput"
     "github.com/charmbracelet/bubbles/viewport"
@@ -14,6 +16,15 @@ import (
     "github.com/interpretive-systems/diffium/internal/diffview"
     "github.com/interpretive-systems/diffium/internal/gitx"
     "github.com/interpretive-systems/diffium/internal/prefs"
+)
+
+const (
+    // Normal match: black on bright white
+    searchMatchStartSeq        = "\x1b[30;107m"
+    // Current match: black on yellow
+    searchCurrentMatchStartSeq = "\x1b[30;43m"
+    // Reset all styles
+    searchMatchEndSeq          = "\x1b[0m"
 )
 
 type model struct {
@@ -34,6 +45,10 @@ type model struct {
     rightVP     viewport.Model
     rightXOffset int
     wrapLines    bool
+
+    rightContent []string
+
+    keyBuffer   string
     // commit wizard state
     showCommit  bool
     commitStep  int // 0: select files, 1: message, 2: confirm/progress
@@ -46,6 +61,7 @@ type model struct {
     commitErr   string
     commitDone  bool
     lastCommit  string
+    
     currentBranch string
     // uncommit wizard state
     showUncommit   bool
@@ -89,6 +105,13 @@ type model struct {
     plErr      string
     plDone     bool
     plOutput   string
+    
+    // search state
+    searchActive  bool
+    searchInput   textinput.Model
+    searchQuery   string
+    searchMatches []int
+    searchIndex   int
 }
 
 // messages
@@ -122,11 +145,15 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     switch msg := msg.(type) {
     case tea.KeyMsg:
+		if m.searchActive {
+			return m.handleSearchKeys(msg)
+		}
         if m.showHelp {
             switch msg.String() {
             case "q":
                 return m, tea.Quit
             case "h", "esc":
+                (&m).closeSearch()
                 m.showHelp = false
                 return m, m.recalcViewport()
             default:
@@ -148,14 +175,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showPull {
             return m.handlePullKeys(msg)
         }
-        switch msg.String() {
+
+        key := msg.String()
+
+        if isNumericKey(key){
+            m.keyBuffer += key
+            return m, nil
+        }
+
+        if !isNumericKey(key) && !isMovementKey(key){
+            m.keyBuffer = ""
+        }
+
+        switch key {
         case "ctrl+c", "q":
             return m, tea.Quit
         case "h":
+			(&m).closeSearch()
             m.showHelp = true
             return m, m.recalcViewport()
         case "c":
             // Open commit wizard
+			(&m).closeSearch()
             m.openCommitWizard()
             return m, m.recalcViewport()
         case "u":
@@ -171,6 +212,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "R":
             // Open reset/clean wizard
             m.openResetCleanWizard()
+            return m, m.recalcViewport()
+        case "/":
+            (&m).openSearch()
             return m, m.recalcViewport()
         case "<", "H":
             if m.leftWidth == 0 {
@@ -201,7 +245,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 return m, nil
             }
             if m.selected < len(m.files)-1 {
-                m.selected++
+				if(m.keyBuffer == ""){
+					m.selected++
+				}else{
+					jump, err := strconv.Atoi(m.keyBuffer)
+					if err != nil{
+						m.selected++
+					} else {
+						m.selected += jump
+						m.selected = min(m.selected, len(m.files) - 1)
+					}
+					m.keyBuffer = ""
+				}
                 m.rows = nil
                 // Reset scroll for new file
                 m.rightVP.GotoTop()
@@ -209,10 +264,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
         case "k", "up":
             if len(m.files) == 0 {
-                return m, nil
+				m.keyBuffer = ""
             }
-            if m.selected > 0 {
-                m.selected--
+			if m.selected > 0 {
+				if(m.keyBuffer == ""){
+					m.selected--
+				}else{
+					jump, err := strconv.Atoi(m.keyBuffer)
+					if err != nil{
+						m.selected--
+					} else {
+						m.selected -= jump
+						m.selected = max(m.selected, 0)
+					}
+					m.keyBuffer = ""
+				}
                 m.rows = nil
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
@@ -265,6 +331,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             }
             m.leftOffset = newOffset
             return m, m.recalcViewport()
+        case "n":
+            return m, (&m).advanceSearch(1)
+        case "N":
+            return m, (&m).advanceSearch(-1)
         case "r":
             return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentDiff(m))
         case "s":
@@ -595,6 +665,9 @@ func (m model) View() string {
     if m.showPull {
         overlay = append(overlay, m.pullOverlayLines(m.width)...)
     }
+    if m.searchActive {
+        overlay = append(overlay, m.searchOverlayLines(m.width)...)
+    }
     overlayH := len(overlay)
 
     contentHeight := m.height - 4 - overlayH // top + top rule + bottom rule + bottom bar
@@ -744,7 +817,10 @@ func (m model) topRightTitle() string {
 }
 
 func (m model) bottomBar() string {
-    leftText := "h: help"
+	leftText := "h: help"
+	if m.keyBuffer != ""{
+		leftText = m.keyBuffer
+	}
     if m.lastCommit != "" {
         leftText += "  |  last: " + m.lastCommit
     }
@@ -897,6 +973,9 @@ func (m *model) recalcViewport() tea.Cmd {
     if m.showPull {
         overlayH += len(m.pullOverlayLines(m.width))
     }
+    if m.searchActive {
+        overlayH += len(m.searchOverlayLines(m.width))
+    }
     contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
@@ -922,8 +1001,17 @@ func (m *model) recalcViewport() tea.Cmd {
     m.rightVP.Width = rightW
     m.rightVP.Height = contentHeight
     // Build content
-    content := strings.Join(m.rightBodyLinesAll(rightW), "\n")
-    m.rightVP.SetContent(content)
+    m.rightContent = m.rightBodyLinesAll(rightW)
+
+	// Update search matches + highlight state
+	if m.searchQuery == "" {
+		m.searchMatches = nil
+		m.searchIndex = 0
+	} else {
+		m.recomputeSearchMatches(false)
+	}
+	m.refreshSearchHighlights()
+
     return nil
 }
 
@@ -1858,6 +1946,350 @@ func (m model) rightBodyLinesAll(width int) []string {
         }
     }
     return lines
+    
+}
+
+func (m *model) openSearch() {
+	ti := textinput.New()
+	ti.Placeholder = "Search diff"
+	ti.Prompt = "/ "
+	ti.CharLimit = 0
+	ti.SetValue(m.searchQuery)
+	ti.CursorEnd()
+	ti.Focus()
+	m.searchInput = ti
+	m.searchActive = true
+}
+
+func (m *model) closeSearch() {
+	if m.searchActive {
+		m.searchInput.Blur()
+	}
+	m.searchActive = false
+}
+
+func (m model) handleSearchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+
+	if !m.searchActive {
+		return m, nil
+	}
+
+    m.searchInput.Focus()
+
+    switch key.String() {
+        case "esc":
+            m.closeSearch()
+            return m, m.recalcViewport()
+        case "ctrl+c":
+            return m, tea.Quit    
+    }
+	
+    
+    // Navigation that does NOT leave input mode
+    switch key.Type {
+    case tea.KeyEnter:
+        return m, (&m).advanceSearch(1)
+    case tea.KeyDown: 
+        return m, (&m).advanceSearch(1)
+    case tea.KeyUp:
+        return m, (&m).advanceSearch(-1)
+    }
+	 
+
+    // Fallback: always let input handle it
+    var cmd tea.Cmd
+	m.searchInput, cmd = m.searchInput.Update(key)
+    m.searchQuery = m.searchInput.Value()
+    m.recomputeSearchMatches(true)
+    m.refreshSearchHighlights()
+
+	if scrollCmd := m.scrollToCurrentMatch(); scrollCmd != nil {
+		return m, tea.Batch(cmd, scrollCmd)
+	}
+
+    return m, cmd
+}
+
+func (m *model) advanceSearch(delta int) tea.Cmd {
+	if len(m.searchMatches) == 0 {
+		return nil
+	}
+	span := len(m.searchMatches)
+	m.searchIndex = (m.searchIndex + delta) % span
+	if m.searchIndex < 0 {
+		m.searchIndex += span
+	}
+	m.refreshSearchHighlights()
+	return m.scrollToCurrentMatch()
+}
+
+func (m *model) recomputeSearchMatches(resetIndex bool) {
+	if m.searchQuery == "" {
+		m.searchMatches = nil
+		if resetIndex {
+			m.searchIndex = 0
+		}
+		return
+	}
+	lowerQuery := strings.ToLower(m.searchQuery)
+	matches := make([]int, 0, len(m.rightContent))
+	for i, line := range m.rightContent {
+		plain := strings.ToLower(ansi.Strip(line))
+		if strings.Contains(plain, lowerQuery) {
+			matches = append(matches, i)
+		}
+	}
+	m.searchMatches = matches
+	if len(matches) == 0 {
+		if resetIndex {
+			m.searchIndex = 0
+		}
+		return
+	}
+	if resetIndex || m.searchIndex >= len(matches) {
+		m.searchIndex = 0
+	}
+}
+
+func (m *model) refreshSearchHighlights() {
+	if len(m.rightContent) == 0 {
+		m.rightVP.SetContent("")
+		return
+	}
+	lines := m.rightContent
+	if m.searchQuery != "" {
+		lines = m.highlightSearchLines(lines)
+	}
+	m.rightVP.SetContent(strings.Join(lines, "\n"))
+}
+
+type runeRange struct {
+	start int
+	end   int
+}
+
+func (m model) highlightSearchLines(lines []string) []string {
+	if len(lines) == 0 || m.searchQuery == "" {
+		return lines
+	}
+	lineHasMatch := make(map[int]struct{}, len(m.searchMatches))
+	for _, idx := range m.searchMatches {
+		if idx >= 0 && idx < len(lines) {
+			lineHasMatch[idx] = struct{}{}
+		}
+	}
+	currentLine := -1
+	if len(m.searchMatches) > 0 && m.searchIndex >= 0 && m.searchIndex < len(m.searchMatches) {
+		currentLine = m.searchMatches[m.searchIndex]
+	}
+	result := make([]string, len(lines))
+	for i, line := range lines {
+		if _, ok := lineHasMatch[i]; !ok {
+			result[i] = line
+			continue
+		}
+		ranges := findQueryRanges(line, m.searchQuery)
+		if len(ranges) == 0 {
+			result[i] = line
+			continue
+		}
+		result[i] = applyANSIRangeHighlight(line, ranges, i == currentLine)
+	}
+	return result
+}
+
+func findQueryRanges(line, query string) []runeRange {
+	plain := ansi.Strip(line)
+	if plain == "" || query == "" {
+		return nil
+	}
+	lowerRunes := []rune(strings.ToLower(plain))
+	queryRunes := []rune(strings.ToLower(query))
+	if len(queryRunes) == 0 || len(queryRunes) > len(lowerRunes) {
+		return nil
+	}
+	ranges := make([]runeRange, 0, 4)
+	for i := 0; i <= len(lowerRunes)-len(queryRunes); i++ {
+		match := true
+		for j := 0; j < len(queryRunes); j++ {
+			if lowerRunes[i+j] != queryRunes[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			ranges = append(ranges, runeRange{start: i, end: i + len(queryRunes)})
+		}
+	}
+	if len(ranges) == 0 {
+		return nil
+	}
+	return mergeRuneRanges(ranges)
+}
+
+func mergeRuneRanges(ranges []runeRange) []runeRange {
+	if len(ranges) <= 1 {
+		return ranges
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start == ranges[j].start {
+			return ranges[i].end < ranges[j].end
+		}
+		return ranges[i].start < ranges[j].start
+	})
+	merged := make([]runeRange, 0, len(ranges))
+	cur := ranges[0]
+	for _, r := range ranges[1:] {
+		if r.start <= cur.end { // overlap or adjacent
+			if r.end > cur.end {
+				cur.end = r.end
+			}
+			continue
+		}
+		merged = append(merged, cur)
+		cur = r
+	}
+	merged = append(merged, cur)
+	return merged
+}
+
+func applyANSIRangeHighlight(line string, ranges []runeRange, isCurrent bool) string {
+	if len(ranges) == 0 {
+		return line
+	}
+	startSeq := searchMatchStartSeq
+	if isCurrent {
+		startSeq = searchCurrentMatchStartSeq
+	}
+	endSeq := searchMatchEndSeq
+	var b strings.Builder
+	matchIdx := 0
+	inMatch := false
+	runePos := 0
+	for i := 0; i < len(line); {
+		if line[i] == 0x1b {
+			next := consumeANSIEscape(line, i)
+			b.WriteString(line[i:next])
+			i = next
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(line[i:])
+		_ = r // rune value unused beyond size and counting
+		if inMatch {
+			for matchIdx < len(ranges) && runePos >= ranges[matchIdx].end {
+				b.WriteString(endSeq)
+				inMatch = false
+				matchIdx++
+			}
+		}
+		for !inMatch && matchIdx < len(ranges) && runePos >= ranges[matchIdx].end {
+			matchIdx++
+		}
+		if !inMatch && matchIdx < len(ranges) && runePos == ranges[matchIdx].start {
+			b.WriteString(startSeq)
+			inMatch = true
+		}
+		b.WriteString(line[i : i+size])
+		runePos++
+		i += size
+	}
+	if inMatch {
+		b.WriteString(endSeq)
+	}
+	return b.String()
+}
+
+func consumeANSIEscape(s string, i int) int {
+	if i >= len(s) || s[i] != 0x1b {
+		if i+1 > len(s) {
+			return len(s)
+		}
+		return i + 1
+	}
+	j := i + 1
+	if j >= len(s) {
+		return j
+	}
+	switch s[j] {
+	case '[': // CSI
+		j++
+		for j < len(s) {
+			c := s[j]
+			if c >= 0x40 && c <= 0x7e {
+				j++
+				break
+			}
+			j++
+		}
+	case ']': // OSC
+		j++
+		for j < len(s) && s[j] != 0x07 {
+			j++
+		}
+		if j < len(s) {
+			j++
+		}
+	case 'P', 'X', '^', '_': // DCS, SOS, PM, APC
+		j++
+		for j < len(s) {
+			if s[j] == 0x1b {
+				j++
+				break
+			}
+			j++
+		}
+	default:
+		j++
+	}
+	if j <= i {
+		return i + 1
+	}
+	return j
+}
+
+func (m *model) scrollToCurrentMatch() tea.Cmd {
+	if len(m.searchMatches) == 0 {
+		return nil
+	}
+	target := m.searchMatches[m.searchIndex]
+	if target < 0 {
+		target = 0
+	}
+	offset := target
+	if m.rightVP.Height > 0 {
+		offset = target - m.rightVP.Height/2
+		if offset < 0 {
+			offset = 0
+		}
+	}
+	maxOffset := len(m.rightContent) - m.rightVP.Height
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	m.rightVP.SetYOffset(offset)
+	return nil
+}
+
+func (m model) searchOverlayLines(width int) []string {
+	if !m.searchActive || width <= 0 {
+		return nil
+	}
+	lines := make([]string, 0, 3)
+	lines = append(lines, m.theme.DividerText(strings.Repeat("?", width)))
+	lines = append(lines, padToWidth(m.searchInput.View(), width))
+	status := "Type to search (esc: close, enter: finish typing)"
+	if m.searchQuery != "" {
+		if len(m.searchMatches) == 0 {
+			status = "No matches (esc: close)"
+		} else {
+			status = fmt.Sprintf("Match %d of %d  (Enter/↓: next, ↑: prev, Esc: close)", m.searchIndex+1, len(m.searchMatches))
+		}
+	}
+	lines = append(lines, padToWidth(lipgloss.NewStyle().Faint(true).Render(status), width))
+	return lines
 }
 
 // --- Commit wizard ---
@@ -2218,4 +2650,12 @@ func padExact(s string, w int) string {
     sw := lipgloss.Width(s)
     if sw >= w { return s }
     return s + strings.Repeat(" ", w-sw)
+}
+
+func isMovementKey(key string) bool{
+    return key == "j" || key == "k"
+}
+
+func isNumericKey(key string) bool{
+    return key <= "9" && key >= "0"
 }
