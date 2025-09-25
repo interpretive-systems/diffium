@@ -235,3 +235,189 @@ func LastCommitSummary(repoRoot string) (string, error) {
     }
     return strings.TrimSpace(string(b)), nil
 }
+
+// FilesInLastCommit lists file paths modified in the last commit (HEAD) compared to its first parent.
+func FilesInLastCommit(repoRoot string) ([]string, error) {
+    // Ensure there is a parent commit
+    if err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "HEAD^").Run(); err != nil {
+        return nil, fmt.Errorf("no parent commit (cannot uncommit from initial commit): %w", err)
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+    b, err := cmd.Output()
+    if err != nil {
+        return nil, fmt.Errorf("git diff-tree: %w", err)
+    }
+    lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+    out := make([]string, 0, len(lines))
+    for _, l := range lines {
+        l = strings.TrimSpace(l)
+        if l != "" {
+            out = append(out, l)
+        }
+    }
+    sort.Strings(out)
+    return out, nil
+}
+
+// UncommitFiles removes the selected paths from the last commit by resetting
+// their index state to HEAD^ and amending the commit. Working tree is left
+// untouched so changes reappear as unstaged modifications.
+func UncommitFiles(repoRoot string, paths []string) error {
+    if len(paths) == 0 {
+        return nil
+    }
+    // Verify parent exists
+    if err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "HEAD^").Run(); err != nil {
+        return fmt.Errorf("cannot uncommit from initial commit: %w", err)
+    }
+    // Reset index for given paths to first parent
+    args := append([]string{"-C", repoRoot, "reset", "-q", "HEAD^", "--"}, paths...)
+    if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+        return fmt.Errorf("git reset HEAD^ -- <paths>: %w: %s", err, string(out))
+    }
+    // Amend commit without changing message
+    if out, err := exec.Command("git", "-C", repoRoot, "commit", "--amend", "--no-edit").CombinedOutput(); err != nil {
+        return fmt.Errorf("git commit --amend: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// CleanPreview runs a dry-run of git clean and returns the lines that would be removed.
+func CleanPreview(repoRoot string, includeIgnored bool) ([]string, error) {
+    args := []string{"-C", repoRoot, "clean", "-d", "-n"}
+    if includeIgnored {
+        args = append(args, "-x")
+    }
+    cmd := exec.Command("git", args...)
+    b, err := cmd.CombinedOutput()
+    if err != nil {
+        return nil, fmt.Errorf("git clean -n: %w: %s", err, string(b))
+    }
+    lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+    out := make([]string, 0, len(lines))
+    for _, l := range lines {
+        l = strings.TrimSpace(l)
+        if l != "" {
+            out = append(out, l)
+        }
+    }
+    return out, nil
+}
+
+// ResetHard performs `git reset --hard`.
+func ResetHard(repoRoot string) error {
+    cmd := exec.Command("git", "-C", repoRoot, "reset", "--hard")
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git reset --hard: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// Clean removes untracked files/dirs: `git clean -d -f` (+ -x if includeIgnored).
+func Clean(repoRoot string, includeIgnored bool) error {
+    args := []string{"-C", repoRoot, "clean", "-d", "-f"}
+    if includeIgnored {
+        args = append(args, "-x")
+    }
+    cmd := exec.Command("git", args...)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git clean -d -f: %w: %s", err, string(out))
+    }
+    return nil
+}
+
+// ResetAndClean executes reset and/or clean in order.
+func ResetAndClean(repoRoot string, doReset, doClean, includeIgnored bool) error {
+    if !doReset && !doClean {
+        return nil
+    }
+    if doReset {
+        if err := ResetHard(repoRoot); err != nil {
+            return err
+        }
+    }
+    if doClean {
+        if err := Clean(repoRoot, includeIgnored); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+
+// ListBranches returns local branch names and the current branch name.
+func ListBranches(repoRoot string) ([]string, string, error) {
+    // Current branch (may be "HEAD" if detached)
+    curCmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+    bcur, err := curCmd.Output()
+    if err != nil {
+        return nil, "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %w", err)
+    }
+    current := strings.TrimSpace(string(bcur))
+
+    // Local branches
+    listCmd := exec.Command("git", "-C", repoRoot, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+    blist, err := listCmd.Output()
+    if err != nil {
+        return nil, "", fmt.Errorf("git for-each-ref: %w", err)
+    }
+    lines := strings.Split(strings.TrimRight(string(blist), "\n"), "\n")
+    out := make([]string, 0, len(lines))
+    for _, l := range lines {
+        l = strings.TrimSpace(l)
+        if l != "" {
+            out = append(out, l)
+        }
+    }
+    sort.Strings(out)
+    return out, current, nil
+}
+
+// Checkout switches branches using `git checkout <branch>`.
+func Checkout(repoRoot, branch string) error {
+    if strings.TrimSpace(branch) == "" {
+        return errors.New("empty branch name")
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "checkout", branch)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git checkout %s: %w: %s", branch, err, string(out))
+    }
+    return nil
+}
+
+// CheckoutNew creates and switches to a new branch: `git checkout -b <name>`.
+func CheckoutNew(repoRoot, name string) error {
+    if strings.TrimSpace(name) == "" {
+        return errors.New("empty branch name")
+    }
+    cmd := exec.Command("git", "-C", repoRoot, "checkout", "-b", name)
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("git checkout -b %s: %w: %s", name, err, string(out))
+    }
+    return nil
+}
+
+// Pull runs `git pull` in the repository.
+func Pull(repoRoot string) error {
+    _, err := PullWithOutput(repoRoot)
+    return err
+}
+
+// PullWithOutput runs `git pull` and returns the raw CLI output.
+func PullWithOutput(repoRoot string) (string, error) {
+    cmd := exec.Command("git", "-C", repoRoot, "pull")
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        return string(out), fmt.Errorf("git pull: %w: %s", err, string(out))
+    }
+    return string(out), nil
+}
+
+// CurrentBranch returns the current branch name (or "HEAD" if detached).
+func CurrentBranch(repoRoot string) (string, error) {
+    cmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+    b, err := cmd.Output()
+    if err != nil {
+        return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %w", err)
+    }
+    return strings.TrimSpace(string(b)), nil
+}

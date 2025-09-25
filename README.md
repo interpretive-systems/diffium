@@ -22,7 +22,12 @@ Watcher TUI that shows changed files on the left and a side-by-side diff on the 
 
 - `j/k` or arrow keys: move selection
 - `J/K`, `PgDn/PgUp`: scroll diff
+- `{/}`: horizontal scroll in diff pane
 - `s`: toggle side-by-side vs inline
+- `w`: toggle line wrap in diff pane
+- `u`: open uncommit wizard (remove selected files from last commit; shows all current changes for selection)
+- `R`: open reset/clean wizard (repo-wide): select reset `git reset --hard`, clean `git clean -d -f`, optionally include ignored; shows preview, then two confirmations (yellow + red)
+- `b`: open branch wizard (list local branches, confirm, then `git checkout`)
 - `r`: refresh now (auto-refresh runs every second)
 - `g/G`: top/bottom
 - `h`: help panel

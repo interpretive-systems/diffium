@@ -8,13 +8,14 @@ import (
     "time"
 	"unicode/utf8"
 
-    "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/bubbles/textinput"
+    "github.com/charmbracelet/bubbles/viewport"
     tea "github.com/charmbracelet/bubbletea"
     "github.com/charmbracelet/lipgloss"
     "github.com/charmbracelet/x/ansi"
     "github.com/interpretive-systems/diffium/internal/diffview"
     "github.com/interpretive-systems/diffium/internal/gitx"
+    "github.com/interpretive-systems/diffium/internal/prefs"
 )
 
 const (
@@ -39,12 +40,15 @@ type model struct {
     lastRefresh time.Time
     showHelp    bool
     leftWidth   int
+    savedLeftWidth int
+    leftOffset  int
     rightVP     viewport.Model
+    rightXOffset int
+    wrapLines    bool
 
-	rightContent []string
+    rightContent []string
 
-	keyBuffer   string
-
+    keyBuffer   string
     // commit wizard state
     showCommit  bool
     commitStep  int // 0: select files, 1: message, 2: confirm/progress
@@ -57,12 +61,57 @@ type model struct {
     commitErr   string
     commitDone  bool
     lastCommit  string
-	// search state
-	searchActive  bool
-	searchInput   textinput.Model
-	searchQuery   string
-	searchMatches []int
-	searchIndex   int
+    
+    currentBranch string
+    // uncommit wizard state
+    showUncommit   bool
+    ucStep         int // 0: select files, 1: confirm/progress
+    ucFiles        []gitx.FileChange // list ALL current changes (like commit wizard)
+    ucSelected     map[string]bool   // keyed by path
+    ucIndex        int
+    ucEligible     map[string]bool   // paths that are part of HEAD (last commit)
+    uncommitting   bool
+    uncommitErr    string
+    uncommitDone   bool
+
+    // reset/clean wizard state
+    showResetClean bool
+    rcStep         int // 0: select, 1: preview, 2: confirm (yellow), 3: confirm (red)
+    rcDoReset      bool
+    rcDoClean      bool
+    rcIncludeIgnored bool
+    rcIndex       int
+    rcPreviewLines []string // from git clean -dn
+    rcPreviewErr   string
+    rcRunning      bool
+    rcErr          string
+    rcDone         bool
+
+    // branch switch wizard
+    showBranch   bool
+    brStep       int // 0: list, 1: confirm/progress
+    brBranches   []string
+    brCurrent    string
+    brIndex      int
+    brRunning    bool
+    brErr        string
+    brDone       bool
+    brInput      textinput.Model
+    brInputActive bool
+
+    // pull wizard
+    showPull   bool
+    plRunning  bool
+    plErr      string
+    plDone     bool
+    plOutput   string
+    
+    // search state
+    searchActive  bool
+    searchInput   textinput.Model
+    searchQuery   string
+    searchMatches []int
+    searchIndex   int
 }
 
 // messages
@@ -90,7 +139,7 @@ func Run(repoRoot string) error {
 }
 
 func (m model) Init() tea.Cmd {
-    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), tickOnce())
+    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), loadPrefs(m.repoRoot), tickOnce())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -114,17 +163,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showCommit {
             return m.handleCommitKeys(msg)
         }
+        if m.showUncommit {
+            return m.handleUncommitKeys(msg)
+        }
+        if m.showResetClean {
+            return m.handleResetCleanKeys(msg)
+        }
+        if m.showBranch {
+            return m.handleBranchKeys(msg)
+        }
+        if m.showPull {
+            return m.handlePullKeys(msg)
+        }
 
-		key := msg.String()
+        key := msg.String()
 
-		if isNumericKey(key){
-			m.keyBuffer += key
-			return m, nil
-		}
+        if isNumericKey(key){
+            m.keyBuffer += key
+            return m, nil
+        }
 
-		if !isNumericKey(key) && !isMovementKey(key){
-			m.keyBuffer = ""
-		}
+        if !isNumericKey(key) && !isMovementKey(key){
+            m.keyBuffer = ""
+        }
 
         switch key {
         case "ctrl+c", "q":
@@ -138,9 +199,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(&m).closeSearch()
             m.openCommitWizard()
             return m, m.recalcViewport()
-		case "/":
-			(&m).openSearch()
-			return m, m.recalcViewport()	
+        case "u":
+            // Open uncommit wizard
+            m.openUncommitWizard()
+            return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
+        case "b":
+            m.openBranchWizard()
+            return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
+        case "p":
+            m.openPullWizard()
+            return m, m.recalcViewport()
+        case "R":
+            // Open reset/clean wizard
+            m.openResetCleanWizard()
+            return m, m.recalcViewport()
+        case "/":
+            (&m).openSearch()
+            return m, m.recalcViewport()
         case "<", "H":
             if m.leftWidth == 0 {
                 m.leftWidth = m.width / 3
@@ -149,6 +224,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if m.leftWidth < 20 {
                 m.leftWidth = 20
             }
+            _ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
             return m, m.recalcViewport()
         case ">", "L":
             if m.leftWidth == 0 {
@@ -162,6 +238,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if m.leftWidth > maxLeft {
                 m.leftWidth = maxLeft
             }
+            _ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
             return m, m.recalcViewport()
         case "j", "down":
             if len(m.files) == 0 {
@@ -220,15 +297,77 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.rightVP.GotoTop()
                 return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
             }
-		case "n":
-			return m, (&m).advanceSearch(1)
-		case "N":
-			return m, (&m).advanceSearch(-1)
+        case "[":
+            // Page up left pane
+            vis := m.rightVP.Height
+            if vis <= 0 { vis = 10 }
+            step := vis - 1
+            if step < 1 { step = 1 }
+            newOffset := m.leftOffset - step
+            if newOffset < 0 { newOffset = 0 }
+            // Keep selection visible within new viewport
+            if m.selected < newOffset {
+                newOffset = m.selected
+            }
+            maxStart := len(m.files) - vis
+            if maxStart < 0 { maxStart = 0 }
+            if newOffset > maxStart { newOffset = maxStart }
+            m.leftOffset = newOffset
+            return m, m.recalcViewport()
+        case "]":
+            // Page down left pane
+            vis := m.rightVP.Height
+            if vis <= 0 { vis = 10 }
+            step := vis - 1
+            if step < 1 { step = 1 }
+            maxStart := len(m.files) - vis
+            if maxStart < 0 { maxStart = 0 }
+            newOffset := m.leftOffset + step
+            if newOffset > maxStart { newOffset = maxStart }
+            // Keep selection visible within new viewport
+            if m.selected >= newOffset+vis {
+                newOffset = m.selected - vis + 1
+                if newOffset < 0 { newOffset = 0 }
+            }
+            m.leftOffset = newOffset
+            return m, m.recalcViewport()
+        case "n":
+            return m, (&m).advanceSearch(1)
+        case "N":
+            return m, (&m).advanceSearch(-1)
         case "r":
             return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentDiff(m))
         case "s":
             m.sideBySide = !m.sideBySide
+            _ = prefs.SaveSideBySide(m.repoRoot, m.sideBySide)
             return m, m.recalcViewport()
+        case "w":
+            // Toggle wrap in diff pane
+            m.wrapLines = !m.wrapLines
+            if m.wrapLines {
+                m.rightXOffset = 0
+            }
+            _ = prefs.SaveWrap(m.repoRoot, m.wrapLines)
+            return m, m.recalcViewport()
+        // Horizontal scroll for right pane
+        case "left", "{":
+            if m.wrapLines { return m, nil }
+            if m.rightXOffset > 0 {
+                m.rightXOffset -= 4
+                if m.rightXOffset < 0 { m.rightXOffset = 0 }
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "right", "}":
+            if m.wrapLines { return m, nil }
+            m.rightXOffset += 4
+            return m, m.recalcViewport()
+        case "home":
+            if m.rightXOffset != 0 {
+                m.rightXOffset = 0
+                return m, m.recalcViewport()
+            }
+            return m, nil
         // Right pane scrolling
         case "pgdown":
             m.rightVP.PageDown()
@@ -254,15 +393,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.height = msg.Height
         if m.leftWidth == 0 {
             // Initialize left width once
-            m.leftWidth = m.width / 3
+            if m.savedLeftWidth > 0 {
+                m.leftWidth = m.savedLeftWidth
+            } else {
+                m.leftWidth = m.width / 3
+            }
             if m.leftWidth < 24 {
                 m.leftWidth = 24
             }
+            // Also ensure it doesn't exceed available
+            maxLeft := m.width - 20
+            if maxLeft < 20 { maxLeft = 20 }
+            if m.leftWidth > maxLeft { m.leftWidth = maxLeft }
         }
         return m, m.recalcViewport()
     case tickMsg:
         // Periodic refresh
-        return m, tea.Batch(loadFiles(m.repoRoot), tickOnce())
+        return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentBranch(m.repoRoot), tickOnce())
     case filesMsg:
         if msg.err != nil {
             m.status = fmt.Sprintf("status error: %v", msg.err)
@@ -311,6 +458,92 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.lastCommit = msg.summary
         }
         return m, nil
+    case currentBranchMsg:
+        if msg.err == nil {
+            m.currentBranch = msg.name
+        }
+        return m, nil
+    case prefsMsg:
+        if msg.err == nil {
+            if msg.p.SideSet { m.sideBySide = msg.p.SideBySide }
+            if msg.p.WrapSet { m.wrapLines = msg.p.Wrap; if m.wrapLines { m.rightXOffset = 0 } }
+            if msg.p.LeftSet {
+                m.savedLeftWidth = msg.p.LeftWidth
+                // If we already know the window size, apply immediately.
+                if m.width > 0 {
+                    lw := m.savedLeftWidth
+                    if lw < 24 { lw = 24 }
+                    maxLeft := m.width - 20
+                    if maxLeft < 20 { maxLeft = 20 }
+                    if lw > maxLeft { lw = maxLeft }
+                    m.leftWidth = lw
+                    return m, m.recalcViewport()
+                }
+            }
+        }
+        return m, nil
+    case pullResultMsg:
+        m.plRunning = false
+        // Always show result output in overlay; close with enter/esc
+        m.plOutput = msg.out
+        if msg.err != nil {
+            m.plErr = msg.err.Error()
+        } else {
+            m.plErr = ""
+        }
+        m.plDone = true
+        m.showPull = true
+        // Refresh repo state after pull
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+    case branchListMsg:
+        if msg.err != nil {
+            m.brErr = msg.err.Error()
+            m.brBranches = nil
+            m.brCurrent = ""
+            m.brIndex = 0
+            return m, m.recalcViewport()
+        }
+        m.brBranches = msg.names
+        m.brCurrent = msg.current
+        m.brErr = ""
+        // Focus current if present
+        m.brIndex = 0
+        for i, n := range m.brBranches {
+            if n == m.brCurrent { m.brIndex = i; break }
+        }
+        return m, m.recalcViewport()
+    case branchResultMsg:
+        m.brRunning = false
+        if msg.err != nil {
+            m.brErr = msg.err.Error()
+            m.brDone = false
+            return m, m.recalcViewport()
+        }
+        m.brErr = ""
+        m.brDone = true
+        m.showBranch = false
+        // refresh files after checkout
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+    case rcPreviewMsg:
+        m.rcPreviewErr = ""
+        if msg.err != nil {
+            m.rcPreviewErr = msg.err.Error()
+            m.rcPreviewLines = nil
+        } else {
+            m.rcPreviewLines = msg.lines
+        }
+        return m, m.recalcViewport()
+    case rcResultMsg:
+        m.rcRunning = false
+        if msg.err != nil {
+            m.rcErr = msg.err.Error()
+            m.rcDone = false
+            return m, tea.Batch(loadFiles(m.repoRoot), m.recalcViewport())
+        }
+        m.rcErr = ""
+        m.rcDone = true
+        m.showResetClean = false
+        return m, tea.Batch(loadFiles(m.repoRoot), m.recalcViewport())
     case commitProgressMsg:
         m.committing = true
         m.commitErr = ""
@@ -330,6 +563,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
         }
         return m, nil
+    case uncommitFilesMsg:
+        if msg.err != nil {
+            m.uncommitErr = msg.err.Error()
+            m.ucFiles = nil
+            m.ucSelected = map[string]bool{}
+            m.ucIndex = 0
+            return m, m.recalcViewport()
+        }
+        m.ucFiles = msg.files
+        m.ucSelected = map[string]bool{}
+        for _, f := range m.ucFiles {
+            m.ucSelected[f.Path] = true
+        }
+        m.ucIndex = 0
+        return m, m.recalcViewport()
+    case uncommitEligibleMsg:
+        if msg.err != nil {
+            // No parent commit or other issue; treat as no eligible files.
+            m.ucEligible = map[string]bool{}
+            return m, m.recalcViewport()
+        }
+        m.ucEligible = map[string]bool{}
+        for _, p := range msg.paths {
+            m.ucEligible[p] = true
+        }
+        return m, m.recalcViewport()
+    case uncommitResultMsg:
+        m.uncommitting = false
+        if msg.err != nil {
+            m.uncommitErr = msg.err.Error()
+            m.uncommitDone = false
+            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+        }
+        m.uncommitErr = ""
+        m.uncommitDone = true
+        m.showUncommit = false
+        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
     }
     return m, nil
 }
@@ -351,8 +621,27 @@ func (m model) View() string {
     }
     sep := m.theme.DividerText("│")
 
-    // Row 1: top bar
-    top := "Changes | " + m.topRightTitle()
+    // Row 1: top bar with right-aligned current branch
+    leftTop := "Changes | " + m.topRightTitle()
+    rightTop := m.currentBranch
+    if rightTop != "" {
+        rightTop = lipgloss.NewStyle().Faint(true).Render(rightTop)
+    }
+    // Compose with right part visible and left truncated if needed
+    {
+        rightW := lipgloss.Width(rightTop)
+        if rightW >= m.width {
+            leftTop = ansi.Truncate(rightTop, m.width, "…")
+        } else {
+            avail := m.width - rightW - 1
+            if lipgloss.Width(leftTop) > avail {
+                leftTop = ansi.Truncate(leftTop, avail, "…")
+            } else if lipgloss.Width(leftTop) < avail {
+                leftTop = leftTop + strings.Repeat(" ", avail-lipgloss.Width(leftTop))
+            }
+            leftTop = leftTop + " " + rightTop
+        }
+    }
     // Row 2: horizontal rule
     hr := m.theme.DividerText(strings.Repeat("─", m.width))
 
@@ -364,9 +653,21 @@ func (m model) View() string {
     if m.showCommit {
         overlay = append(overlay, m.commitOverlayLines(m.width)...)
     }
-	if m.searchActive { 
-    	overlay = append(overlay, m.searchOverlayLines(m.width)...)
-	}
+    if m.showUncommit {
+        overlay = append(overlay, m.uncommitOverlayLines(m.width)...)
+    }
+    if m.showResetClean {
+        overlay = append(overlay, m.resetCleanOverlayLines(m.width)...)
+    }
+    if m.showBranch {
+        overlay = append(overlay, m.branchOverlayLines(m.width)...)
+    }
+    if m.showPull {
+        overlay = append(overlay, m.pullOverlayLines(m.width)...)
+    }
+    if m.searchActive {
+        overlay = append(overlay, m.searchOverlayLines(m.width)...)
+    }
     overlayH := len(overlay)
 
     contentHeight := m.height - 4 - overlayH // top + top rule + bottom rule + bottom bar
@@ -384,7 +685,7 @@ func (m model) View() string {
     maxLines := contentHeight
 
     var b strings.Builder
-    b.WriteString(top)
+    b.WriteString(leftTop)
     b.WriteByte('\n')
     b.WriteString(hr)
     b.WriteByte('\n')
@@ -431,7 +732,13 @@ func (m model) leftBodyLines(max int) []string {
         lines = append(lines, "No changes detected")
         return lines
     }
-    for i, f := range m.files {
+    start := m.leftOffset
+    if start < 0 { start = 0 }
+    if start > len(m.files) { start = len(m.files) }
+    end := start + max
+    if end > len(m.files) { end = len(m.files) }
+    for i := start; i < end; i++ {
+        f := m.files[i]
         marker := "  "
         if i == m.selected {
             marker = "> "
@@ -439,9 +746,6 @@ func (m model) leftBodyLines(max int) []string {
         status := fileStatusLabel(f)
         line := fmt.Sprintf("%s%s %s", marker, status, f.Path)
         lines = append(lines, line)
-        if len(lines) >= max {
-            break
-        }
     }
     return lines
 }
@@ -608,6 +912,9 @@ func (m model) viewHelp() string {
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
         "</> or H/L      Adjust left pane width",
+        "[/]            Page left file list",
+        "{/}            Horizontal scroll (diff)",
+        "b              Switch branch (open wizard)",
         "s              Toggle side-by-side / inline",
         "r              Refresh now",
         "g / G          Top / Bottom",
@@ -654,13 +961,42 @@ func (m *model) recalcViewport() tea.Cmd {
     if m.showCommit {
         overlayH += len(m.commitOverlayLines(m.width))
     }
-	if m.searchActive { 
-    	overlayH += len(m.searchOverlayLines(m.width))
-	}
+    if m.showUncommit {
+        overlayH += len(m.uncommitOverlayLines(m.width))
+    }
+    if m.showResetClean {
+        overlayH += len(m.resetCleanOverlayLines(m.width))
+    }
+    if m.showBranch {
+        overlayH += len(m.branchOverlayLines(m.width))
+    }
+    if m.showPull {
+        overlayH += len(m.pullOverlayLines(m.width))
+    }
+    if m.searchActive {
+        overlayH += len(m.searchOverlayLines(m.width))
+    }
     contentHeight := m.height - 4 - overlayH
     if contentHeight < 1 {
         contentHeight = 1
     }
+    // Clamp leftOffset and keep selection visible in left pane
+    vis := contentHeight
+    if vis < 1 { vis = 1 }
+    if m.leftOffset < 0 { m.leftOffset = 0 }
+    maxStart := len(m.files) - vis
+    if maxStart < 0 { maxStart = 0 }
+    if m.leftOffset > maxStart { m.leftOffset = maxStart }
+    if len(m.files) > 0 {
+        if m.selected < m.leftOffset {
+            m.leftOffset = m.selected
+        } else if m.selected >= m.leftOffset+vis {
+            m.leftOffset = m.selected - vis + 1
+            if m.leftOffset < 0 { m.leftOffset = 0 }
+        }
+        if m.leftOffset > maxStart { m.leftOffset = maxStart }
+    }
+
     // Set dimensions
     m.rightVP.Width = rightW
     m.rightVP.Height = contentHeight
@@ -690,9 +1026,16 @@ func (m model) helpOverlayLines(width int) []string {
     keys := []string{
         "j/k or arrows  Move selection",
         "J/K, PgDn/PgUp  Scroll diff",
+        "{/}            Horizontal scroll (diff)",
         "</> or H/L      Adjust left pane width",
+        "[/]            Page left file list",
+        "b              Switch branch (open wizard)",
+        "p              Pull (open wizard)",
+        "u              Uncommit (open wizard)",
+        "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
         "s              Toggle side-by-side / inline",
+        "w              Toggle line wrap (diff)",
         "r              Refresh now",
         "g / G          Top / Bottom",
         "q              Quit",
@@ -756,6 +1099,732 @@ func (m model) commitOverlayLines(width int) []string {
     return lines
 }
 
+// --- Uncommit wizard ---
+
+type uncommitFilesMsg struct {
+    files []gitx.FileChange
+    err   error
+}
+
+// --- Reset/Clean wizard ---
+
+type rcPreviewMsg struct{
+    lines []string
+    err error
+}
+
+// --- Branch switch wizard ---
+
+type branchListMsg struct{
+    names   []string
+    current string
+    err     error
+}
+
+// --- Pull wizard ---
+
+type pullResultMsg struct{ out string; err error }
+
+func (m *model) openPullWizard() {
+    m.showPull = true
+    m.plRunning = false
+    m.plErr = ""
+    m.plDone = false
+    m.plOutput = ""
+}
+
+func (m model) pullOverlayLines(width int) []string {
+    if !m.showPull { return nil }
+    lines := make([]string, 0, 32)
+    lines = append(lines, strings.Repeat("─", width))
+    if m.plDone {
+        title := lipgloss.NewStyle().Bold(true).Render("Pull — Result (enter/esc: close)")
+        lines = append(lines, title)
+        if m.plErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.plErr)
+        }
+        if m.plOutput != "" {
+            // Show up to 12 lines of output
+            outLines := strings.Split(strings.TrimRight(m.plOutput, "\n"), "\n")
+            max := 12
+            for i, l := range outLines {
+                if i >= max { break }
+                lines = append(lines, l)
+            }
+            if len(outLines) > max {
+                lines = append(lines, fmt.Sprintf("… and %d more", len(outLines)-max))
+            }
+        } else if m.plErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(no output)"))
+        }
+    } else {
+        title := lipgloss.NewStyle().Bold(true).Render("Pull — Confirm (y/enter: pull, esc: cancel)")
+        lines = append(lines, title)
+        if m.plRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Pulling…"))
+        }
+        if m.plErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.plErr)
+        }
+    }
+    return lines
+}
+
+func (m model) handlePullKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch key.String() {
+    case "esc":
+        if m.plDone && !m.plRunning {
+            m.showPull = false
+            m.plDone = false
+            m.plOutput = ""
+            m.plErr = ""
+            return m, m.recalcViewport()
+        }
+        if !m.plRunning { m.showPull = false; return m, m.recalcViewport() }
+        return m, nil
+    case "y", "enter":
+        if m.plDone && !m.plRunning {
+            // Close results view
+            m.showPull = false
+            m.plDone = false
+            m.plOutput = ""
+            m.plErr = ""
+            return m, m.recalcViewport()
+        }
+        if !m.plRunning && !m.plDone {
+            m.plRunning = true
+            m.plErr = ""
+            return m, runPull(m.repoRoot)
+        }
+        return m, nil
+    }
+    return m, nil
+}
+
+func runPull(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        out, err := gitx.PullWithOutput(repoRoot)
+        if err != nil {
+            return pullResultMsg{out: out, err: err}
+        }
+        return pullResultMsg{out: out, err: nil}
+    }
+}
+
+type branchResultMsg struct{ err error }
+
+func loadBranches(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        names, current, err := gitx.ListBranches(repoRoot)
+        return branchListMsg{names: names, current: current, err: err}
+    }
+}
+
+func (m *model) openBranchWizard() {
+    m.showBranch = true
+    m.brStep = 0
+    m.brBranches = nil
+    m.brCurrent = ""
+    m.brIndex = 0
+    m.brRunning = false
+    m.brErr = ""
+    m.brDone = false
+    m.brInput = textinput.Model{}
+    m.brInputActive = false
+}
+
+func (m model) branchOverlayLines(width int) []string {
+    if !m.showBranch { return nil }
+    lines := make([]string, 0, 128)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.brStep {
+    case 0:
+        title := lipgloss.NewStyle().Bold(true).Render("Branches — Select (enter: continue, n: new, esc: cancel)")
+        lines = append(lines, title)
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+        if len(m.brBranches) == 0 && m.brErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Loading branches…"))
+            return lines
+        }
+        for i, n := range m.brBranches {
+            cur := "  "
+            if i == m.brIndex { cur = "> " }
+            mark := "   "
+            if n == m.brCurrent { mark = "[*]" }
+            lines = append(lines, fmt.Sprintf("%s%s %s", cur, mark, n))
+        }
+        lines = append(lines, lipgloss.NewStyle().Faint(true).Render("[*] current branch"))
+    case 1:
+        title := lipgloss.NewStyle().Bold(true).Render("Checkout — Confirm (y/enter: checkout, b: back, esc: cancel)")
+        lines = append(lines, title)
+        if len(m.brBranches) > 0 {
+            name := m.brBranches[m.brIndex]
+            lines = append(lines, fmt.Sprintf("Branch: %s", name))
+        }
+        if m.brRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Checking out…"))
+        }
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+    case 2:
+        // New branch: name input
+        mode := "action"
+        if m.brInputActive { mode = "input" }
+        title := lipgloss.NewStyle().Bold(true).Render("New Branch — Name (i: input, enter: continue, b: back, esc: " + map[bool]string{true:"leave input", false:"cancel"}[m.brInputActive] + ") ["+mode+"]")
+        lines = append(lines, title)
+        lines = append(lines, m.brInput.View())
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+    case 3:
+        // New branch: confirm
+        title := lipgloss.NewStyle().Bold(true).Render("New Branch — Confirm (y/enter: create, b: back, esc: cancel)")
+        lines = append(lines, title)
+        lines = append(lines, "Name: "+m.brInput.Value())
+        if m.brRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Creating…"))
+        }
+        if m.brErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.brErr)
+        }
+    }
+    return lines
+}
+
+func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.brStep {
+    case 0:
+        switch key.String() {
+        case "esc":
+            m.showBranch = false
+            return m, m.recalcViewport()
+        case "j", "down":
+            if len(m.brBranches) > 0 && m.brIndex < len(m.brBranches)-1 { m.brIndex++ }
+            return m, nil
+        case "k", "up":
+            if m.brIndex > 0 { m.brIndex-- }
+            return m, nil
+        case "n":
+            // New branch flow
+            ti := textinput.New()
+            ti.Placeholder = "Branch name"
+            ti.Prompt = "> "
+            // Start in action mode; 'i' toggles input focus
+            m.brInput = ti
+            m.brInputActive = false
+            m.brStep = 2
+            m.brErr = ""
+            m.brDone = false
+            m.brRunning = false
+            return m, m.recalcViewport()
+        case "enter":
+            if len(m.brBranches) == 0 { return m, nil }
+            m.brStep = 1
+            m.brErr = ""
+            m.brDone = false
+            m.brRunning = false
+            return m, m.recalcViewport()
+        }
+    case 1:
+        switch key.String() {
+        case "esc":
+            if !m.brRunning { m.showBranch = false; return m, m.recalcViewport() }
+            return m, nil
+        case "b":
+            if !m.brRunning && !m.brDone { m.brStep = 0; return m, m.recalcViewport() }
+            return m, nil
+        case "y", "enter":
+            if !m.brRunning && !m.brDone {
+                if len(m.brBranches) == 0 { return m, nil }
+                name := m.brBranches[m.brIndex]
+                m.brRunning = true
+                m.brErr = ""
+                return m, runCheckout(m.repoRoot, name)
+            }
+            return m, nil
+        }
+    case 2: // new branch name
+        switch key.String() {
+        case "esc":
+            if m.brInputActive {
+                m.brInputActive = false
+                return m, m.recalcViewport()
+            }
+            m.showBranch = false
+            return m, m.recalcViewport()
+        case "i":
+            if !m.brInputActive {
+                m.brInputActive = true
+                m.brInput.Focus()
+                return m, m.recalcViewport()
+            }
+            // already active, treat as input
+        case "b":
+            if !m.brInputActive {
+                m.brStep = 0
+                return m, m.recalcViewport()
+            }
+            // else forward to input
+        case "enter":
+            if !m.brInputActive {
+                if strings.TrimSpace(m.brInput.Value()) == "" {
+                    m.brErr = "empty branch name"
+                    return m, nil
+                }
+                m.brStep = 3
+                m.brErr = ""
+                m.brDone = false
+                m.brRunning = false
+                return m, m.recalcViewport()
+            }
+            // in input mode, forward to text input
+        }
+        if m.brInputActive {
+            var cmd tea.Cmd
+            m.brInput, cmd = m.brInput.Update(key)
+            return m, cmd
+        }
+        return m, nil
+    case 3: // confirm new branch
+        switch key.String() {
+        case "esc":
+            if !m.brRunning { m.showBranch = false; return m, m.recalcViewport() }
+            return m, nil
+        case "b":
+            if !m.brRunning && !m.brDone { m.brStep = 2; return m, m.recalcViewport() }
+            return m, nil
+        case "y", "enter":
+            if !m.brRunning && !m.brDone {
+                name := strings.TrimSpace(m.brInput.Value())
+                if name == "" {
+                    m.brErr = "empty branch name"
+                    return m, nil
+                }
+                m.brRunning = true
+                m.brErr = ""
+                return m, runCreateBranch(m.repoRoot, name)
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func runCheckout(repoRoot, branch string) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.Checkout(repoRoot, branch); err != nil {
+            return branchResultMsg{err: err}
+        }
+        return branchResultMsg{err: nil}
+    }
+}
+
+func runCreateBranch(repoRoot, name string) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.CheckoutNew(repoRoot, name); err != nil {
+            return branchResultMsg{err: err}
+        }
+        return branchResultMsg{err: nil}
+    }
+}
+
+type rcResultMsg struct{ err error }
+
+func (m *model) openResetCleanWizard() {
+    m.showResetClean = true
+    m.rcStep = 0
+    m.rcDoReset = false
+    m.rcDoClean = false
+    m.rcIncludeIgnored = false
+    m.rcIndex = 0
+    m.rcPreviewLines = nil
+    m.rcPreviewErr = ""
+    m.rcRunning = false
+    m.rcErr = ""
+    m.rcDone = false
+}
+
+func (m model) resetCleanOverlayLines(width int) []string {
+    if !m.showResetClean { return nil }
+    lines := make([]string, 0, 128)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.rcStep {
+    case 0: // select actions/options
+        title := lipgloss.NewStyle().Bold(true).Render("Reset/Clean — Select actions (space: toggle, a: toggle both, enter: continue, esc: cancel)")
+        lines = append(lines, title)
+        items := []struct{ label string; on bool }{
+            {"Reset working tree (git reset --hard)", m.rcDoReset},
+            {"Clean untracked (git clean -d -f)", m.rcDoClean},
+            {"Include ignored in clean (-x)", m.rcIncludeIgnored},
+        }
+        for i, it := range items {
+            cur := "  "
+            if i == m.rcIndex { cur = "> " }
+            lines = append(lines, fmt.Sprintf("%s%s %s", cur, checkbox(it.on), it.label))
+        }
+        lines = append(lines, lipgloss.NewStyle().Faint(true).Render("A preview will be shown before confirmation"))
+        if m.rcErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.rcErr)
+        }
+    case 1: // preview
+        title := lipgloss.NewStyle().Bold(true).Render("Reset/Clean — Preview (enter: continue, b: back, esc: cancel)")
+        lines = append(lines, title)
+        // Reset preview summary from current file list (tracked changes)
+        if m.rcDoReset {
+            tracked := 0
+            for _, f := range m.files {
+                if !f.Untracked && (f.Staged || f.Unstaged || f.Deleted) {
+                    tracked++
+                }
+            }
+            lines = append(lines, fmt.Sprintf("Reset would discard tracked changes for ~%d file(s)", tracked))
+        } else {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Reset: (not selected)"))
+        }
+        // Clean preview
+        if m.rcDoClean {
+            if m.rcPreviewErr != "" {
+                lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Clean preview error: ")+m.rcPreviewErr)
+            } else if len(m.rcPreviewLines) == 0 {
+                lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Clean: nothing to remove"))
+            } else {
+                lines = append(lines, lipgloss.NewStyle().Bold(true).Render("Clean would remove:"))
+                max := 10
+                for i, l := range m.rcPreviewLines {
+                    if i >= max { break }
+                    lines = append(lines, l)
+                }
+                if len(m.rcPreviewLines) > max {
+                    lines = append(lines, fmt.Sprintf("… and %d more", len(m.rcPreviewLines)-max))
+                }
+                if m.rcIncludeIgnored {
+                    lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(including ignored files)"))
+                }
+            }
+        } else {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Clean: (not selected)"))
+        }
+        // Show exact commands
+        var cmds []string
+        if m.rcDoReset { cmds = append(cmds, "git reset --hard") }
+        if m.rcDoClean {
+            c := "git clean -d -f"
+            if m.rcIncludeIgnored { c += " -x" }
+            cmds = append(cmds, c)
+        }
+        if len(cmds) > 0 {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Commands: "+strings.Join(cmds, "  &&  ")))
+        } else {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("No actions selected"))
+        }
+    case 2: // first (yellow) confirmation
+        title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("Confirm — This will discard local changes (enter: continue, b: back, esc: cancel)")
+        lines = append(lines, title)
+        lines = append(lines, "Proceed to final confirmation?")
+    case 3: // final (red) confirmation
+        title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("FINAL CONFIRMATION — Destructive action (y/enter: execute, b: back, esc: cancel)")
+        lines = append(lines, title)
+        if m.rcRunning {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Running…"))
+        }
+        if m.rcErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.rcErr)
+        }
+    }
+    return lines
+}
+
+func checkbox(on bool) string { if on { return "[x]" } ; return "[ ]" }
+
+func (m model) handleResetCleanKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.rcStep {
+    case 0: // select
+        switch key.String() {
+        case "esc":
+            m.showResetClean = false
+            return m, m.recalcViewport()
+        case "j", "down":
+            if m.rcIndex < 2 { m.rcIndex++ }
+            return m, nil
+        case "k", "up":
+            if m.rcIndex > 0 { m.rcIndex-- }
+            return m, nil
+        case " ":
+            switch m.rcIndex {
+            case 0:
+                m.rcDoReset = !m.rcDoReset
+            case 1:
+                m.rcDoClean = !m.rcDoClean
+            case 2:
+                m.rcIncludeIgnored = !m.rcIncludeIgnored
+            }
+            return m, nil
+        case "a":
+            both := m.rcDoReset && m.rcDoClean
+            m.rcDoReset = !both
+            m.rcDoClean = !both
+            return m, nil
+        case "enter":
+            if !m.rcDoReset && !m.rcDoClean {
+                m.rcErr = "no actions selected"
+                return m, m.recalcViewport()
+            }
+            m.rcStep = 1
+            m.rcPreviewErr = ""
+            m.rcPreviewLines = nil
+            if m.rcDoClean {
+                return m, loadRCPreview(m.repoRoot, m.rcIncludeIgnored)
+            }
+            return m, m.recalcViewport()
+        }
+    case 1: // preview
+        switch key.String() {
+        case "esc":
+            m.showResetClean = false
+            return m, m.recalcViewport()
+        case "b":
+            m.rcStep = 0
+            return m, m.recalcViewport()
+        case "enter":
+            m.rcStep = 2
+            return m, m.recalcViewport()
+        }
+    case 2: // yellow confirm
+        switch key.String() {
+        case "esc":
+            m.showResetClean = false
+            return m, m.recalcViewport()
+        case "b":
+            m.rcStep = 1
+            return m, m.recalcViewport()
+        case "enter":
+            m.rcStep = 3
+            return m, m.recalcViewport()
+        }
+    case 3: // red confirm
+        switch key.String() {
+        case "esc":
+            if !m.rcRunning {
+                m.showResetClean = false
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "b":
+            if !m.rcRunning {
+                m.rcStep = 2
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "y", "enter":
+            if !m.rcRunning && !m.rcDone {
+                m.rcRunning = true
+                m.rcErr = ""
+                return m, runResetClean(m.repoRoot, m.rcDoReset, m.rcDoClean, m.rcIncludeIgnored)
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func loadRCPreview(repoRoot string, includeIgnored bool) tea.Cmd {
+    return func() tea.Msg {
+        lines, err := gitx.CleanPreview(repoRoot, includeIgnored)
+        return rcPreviewMsg{lines: lines, err: err}
+    }
+}
+
+func runResetClean(repoRoot string, doReset, doClean bool, includeIgnored bool) tea.Cmd {
+    return func() tea.Msg {
+        if err := gitx.ResetAndClean(repoRoot, doReset, doClean, includeIgnored); err != nil {
+            return rcResultMsg{err: err}
+        }
+        return rcResultMsg{err: nil}
+    }
+}
+
+type uncommitResultMsg struct{ err error }
+
+func loadUncommitFiles(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        files, err := gitx.ChangedFiles(repoRoot)
+        return uncommitFilesMsg{files: files, err: err}
+    }
+}
+
+type uncommitEligibleMsg struct {
+    paths []string
+    err   error
+}
+
+func loadUncommitEligible(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        ps, err := gitx.FilesInLastCommit(repoRoot)
+        return uncommitEligibleMsg{paths: ps, err: err}
+    }
+}
+
+func (m *model) openUncommitWizard() {
+    m.showUncommit = true
+    m.ucStep = 0
+    m.ucFiles = nil
+    m.ucSelected = map[string]bool{}
+    m.ucIndex = 0
+    m.uncommitting = false
+    m.uncommitErr = ""
+    m.uncommitDone = false
+}
+
+func (m model) uncommitOverlayLines(width int) []string {
+    if !m.showUncommit {
+        return nil
+    }
+    lines := make([]string, 0, 64)
+    lines = append(lines, strings.Repeat("─", width))
+    switch m.ucStep {
+    case 0:
+        title := lipgloss.NewStyle().Bold(true).Render("Uncommit — Select files (space: toggle, a: all, enter: continue, esc: cancel)")
+        lines = append(lines, title)
+        if len(m.ucFiles) == 0 && m.uncommitErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("Loading files…"))
+            return lines
+        }
+        if m.uncommitErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.uncommitErr)
+        }
+        if len(m.ucFiles) == 0 && m.uncommitErr == "" {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("No changes to choose from"))
+            return lines
+        }
+        for i, f := range m.ucFiles {
+            cur := "  "
+            if i == m.ucIndex { cur = "> " }
+            mark := "[ ]"
+            if m.ucSelected[f.Path] { mark = "[x]" }
+            status := fileStatusLabel(f)
+            lines = append(lines, fmt.Sprintf("%s%s %s %s", cur, mark, status, f.Path))
+        }
+    case 1:
+        title := lipgloss.NewStyle().Bold(true).Render("Uncommit — Confirm (y/enter: uncommit, b: back, esc: cancel)")
+        lines = append(lines, title)
+        sel := m.uncommitSelectedPaths()
+        total := len(sel)
+        elig := 0
+        if m.ucEligible != nil {
+            for _, p := range sel { if m.ucEligible[p] { elig++ } }
+        }
+        inelig := total - elig
+        lines = append(lines, fmt.Sprintf("Selected: %d  Eligible to uncommit: %d  Ignored: %d", total, elig, inelig))
+        if m.ucEligible == nil {
+            lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(resolving eligibility…)"))
+        }
+        if m.uncommitting {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Uncommitting…"))
+        }
+        if m.uncommitErr != "" {
+            lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.uncommitErr)
+        }
+    }
+    return lines
+}
+
+func (m model) handleUncommitKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+    switch m.ucStep {
+    case 0:
+        switch key.String() {
+        case "esc":
+            m.showUncommit = false
+            return m, m.recalcViewport()
+        case "enter":
+            if len(m.ucFiles) == 0 {
+                return m, nil
+            }
+            m.ucStep = 1
+            m.uncommitErr = ""
+            m.uncommitDone = false
+            m.uncommitting = false
+            return m, m.recalcViewport()
+        case "j", "down":
+            if len(m.ucFiles) > 0 && m.ucIndex < len(m.ucFiles)-1 { m.ucIndex++ }
+            return m, nil
+        case "k", "up":
+            if m.ucIndex > 0 { m.ucIndex-- }
+            return m, nil
+        case " ":
+            if len(m.ucFiles) > 0 {
+                p := m.ucFiles[m.ucIndex].Path
+                m.ucSelected[p] = !m.ucSelected[p]
+            }
+            return m, nil
+        case "a":
+            all := true
+            for _, f := range m.ucFiles { if !m.ucSelected[f.Path] { all = false; break } }
+            set := !all
+            for _, f := range m.ucFiles { m.ucSelected[f.Path] = set }
+            return m, nil
+        }
+    case 1:
+        switch key.String() {
+        case "esc":
+            if !m.uncommitting {
+                m.showUncommit = false
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "b":
+            if !m.uncommitting && !m.uncommitDone {
+                m.ucStep = 0
+                return m, m.recalcViewport()
+            }
+            return m, nil
+        case "y", "enter":
+            if !m.uncommitting && !m.uncommitDone {
+                sel := m.uncommitSelectedPaths()
+                if len(sel) == 0 {
+                    m.uncommitErr = "no files selected"
+                    return m, nil
+                }
+                m.uncommitErr = ""
+                m.uncommitting = true
+                return m, runUncommit(m.repoRoot, sel)
+            }
+            return m, nil
+        }
+    }
+    return m, nil
+}
+
+func (m model) uncommitSelectedPaths() []string {
+    var out []string
+    for _, f := range m.ucFiles {
+        if m.ucSelected[f.Path] { out = append(out, f.Path) }
+    }
+    return out
+}
+
+func runUncommit(repoRoot string, paths []string) tea.Cmd {
+    return func() tea.Msg {
+        // Filter to eligible paths (present in last commit)
+        eligible, err := gitx.FilesInLastCommit(repoRoot)
+        if err != nil {
+            return uncommitResultMsg{err: err}
+        }
+        eligSet := map[string]bool{}
+        for _, p := range eligible { eligSet[p] = true }
+        var toUncommit []string
+        for _, p := range paths { if eligSet[p] { toUncommit = append(toUncommit, p) } }
+        if len(toUncommit) == 0 {
+            return uncommitResultMsg{err: fmt.Errorf("no selected files are in the last commit")}
+        }
+        if err := gitx.UncommitFiles(repoRoot, toUncommit); err != nil {
+            return uncommitResultMsg{err: err}
+        }
+        return uncommitResultMsg{err: nil}
+    }
+}
 func (m model) rightBodyLinesAll(width int) []string {
     lines := make([]string, 0, 1024)
     if len(m.files) == 0 {
@@ -778,14 +1847,33 @@ func (m model) rightBodyLinesAll(width int) []string {
         for _, r := range m.rows {
             switch r.Kind {
             case diffview.RowHunk:
-                // Show a subtle separator instead of raw @@ header
+                // subtle separator fills full width
                 lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowMeta:
                 // skip
             default:
-                l := m.renderSideCell(r, "left", colsW)
-                rr := m.renderSideCell(r, "right", colsW)
-                lines = append(lines, l+mid+rr)
+                if m.wrapLines {
+                    lLines := m.renderSideCellWrap(r, "left", colsW)
+                    rLines := m.renderSideCellWrap(r, "right", colsW)
+                    n := len(lLines)
+                    if len(rLines) > n { n = len(rLines) }
+                    for i := 0; i < n; i++ {
+                        var l, rr string
+                        if i < len(lLines) { l = lLines[i] } else { l = strings.Repeat(" ", colsW) }
+                        if i < len(rLines) { rr = rLines[i] } else { rr = strings.Repeat(" ", colsW) }
+                        lines = append(lines, l+mid+rr)
+                    }
+                } else {
+                    l := m.renderSideCell(r, "left", colsW)
+                    rr := m.renderSideCell(r, "right", colsW)
+                    if m.rightXOffset > 0 {
+                        l = sliceANSI(l, m.rightXOffset, colsW)
+                        rr = sliceANSI(rr, m.rightXOffset, colsW)
+                        l = padExact(l, colsW)
+                        rr = padExact(rr, colsW)
+                    }
+                    lines = append(lines, l+mid+rr)
+                }
             }
         }
     } else {
@@ -794,14 +1882,66 @@ func (m model) rightBodyLinesAll(width int) []string {
             case diffview.RowHunk:
                 lines = append(lines, lipgloss.NewStyle().Faint(true).Render(strings.Repeat("·", width)))
             case diffview.RowContext:
-                lines = append(lines, "  "+r.Left)
+                base := "  "+r.Left
+                if m.wrapLines {
+                    wrapped := ansi.Hardwrap(base, width, false)
+                    lines = append(lines, strings.Split(wrapped, "\n")...)
+                } else {
+                    line := base
+                    if m.rightXOffset > 0 {
+                        line = sliceANSI(line, m.rightXOffset, width)
+                        line = padExact(line, width)
+                    }
+                    lines = append(lines, line)
+                }
             case diffview.RowAdd:
-                lines = append(lines, m.theme.AddText("+ "+r.Right))
+                base := m.theme.AddText("+ "+r.Right)
+                if m.wrapLines {
+                    wrapped := ansi.Hardwrap(base, width, false)
+                    lines = append(lines, strings.Split(wrapped, "\n")...)
+                } else {
+                    line := base
+                    if m.rightXOffset > 0 {
+                        line = sliceANSI(line, m.rightXOffset, width)
+                        line = padExact(line, width)
+                    }
+                    lines = append(lines, line)
+                }
             case diffview.RowDel:
-                lines = append(lines, m.theme.DelText("- "+r.Left))
+                base := m.theme.DelText("- "+r.Left)
+                if m.wrapLines {
+                    wrapped := ansi.Hardwrap(base, width, false)
+                    lines = append(lines, strings.Split(wrapped, "\n")...)
+                } else {
+                    line := base
+                    if m.rightXOffset > 0 {
+                        line = sliceANSI(line, m.rightXOffset, width)
+                        line = padExact(line, width)
+                    }
+                    lines = append(lines, line)
+                }
             case diffview.RowReplace:
-                lines = append(lines, m.theme.DelText("- "+r.Left))
-                lines = append(lines, m.theme.AddText("+ "+r.Right))
+                base1 := m.theme.DelText("- "+r.Left)
+                base2 := m.theme.AddText("+ "+r.Right)
+                if m.wrapLines {
+                    wrapped1 := strings.Split(ansi.Hardwrap(base1, width, false), "\n")
+                    wrapped2 := strings.Split(ansi.Hardwrap(base2, width, false), "\n")
+                    lines = append(lines, wrapped1...)
+                    lines = append(lines, wrapped2...)
+                } else {
+                    line1 := base1
+                    if m.rightXOffset > 0 {
+                        line1 = sliceANSI(line1, m.rightXOffset, width)
+                        line1 = padExact(line1, width)
+                    }
+                    lines = append(lines, line1)
+                    line2 := base2
+                    if m.rightXOffset > 0 {
+                        line2 = sliceANSI(line2, m.rightXOffset, width)
+                        line2 = padExact(line2, width)
+                    }
+                    lines = append(lines, line2)
+                }
             }
         }
     }
@@ -1166,6 +2306,31 @@ func loadLastCommit(repoRoot string) tea.Cmd {
     }
 }
 
+type currentBranchMsg struct{
+    name string
+    err error
+}
+
+func loadCurrentBranch(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        name, err := gitx.CurrentBranch(repoRoot)
+        return currentBranchMsg{name: name, err: err}
+    }
+}
+
+type prefsMsg struct{
+    p   prefs.Prefs
+    err error
+}
+
+func loadPrefs(repoRoot string) tea.Cmd {
+    return func() tea.Msg {
+        // Loading never errors for now; returns zero-vals on missing keys
+        p := prefs.Load(repoRoot)
+        return prefsMsg{p: p, err: nil}
+    }
+}
+
 func (m *model) openCommitWizard() {
     m.showCommit = true
     m.commitStep = 0
@@ -1405,14 +2570,92 @@ func (m model) renderSideCell(r diffview.Row, side string, width int) string {
         return ansi.Truncate(marker+" ", width, "")
     }
     bodyW := width - 2
-    body := padToWidth(content, bodyW)
+    // First clip right side to avoid wrapping
+    clipped := clipToWidth(content, bodyW)
+    // Then apply horizontal slice if any
+    if m.rightXOffset > 0 {
+        clipped = sliceANSI(clipped, m.rightXOffset, bodyW)
+    }
+    body := padExact(clipped, bodyW)
     return marker + " " + body
 }
 
+// renderSideCellWrap renders a cell like renderSideCell but wraps the content
+// to the given width and returns multiple visual lines. The marker is repeated
+// on each wrapped line.
+func (m model) renderSideCellWrap(r diffview.Row, side string, width int) []string {
+    marker := " "
+    content := ""
+    switch side {
+    case "left":
+        content = r.Left
+        switch r.Kind {
+        case diffview.RowContext:
+            marker = " "
+        case diffview.RowDel, diffview.RowReplace:
+            marker = m.theme.DelText("-")
+            content = m.theme.DelText(content)
+        case diffview.RowAdd:
+            marker = " "
+            content = ""
+        }
+    case "right":
+        content = r.Right
+        switch r.Kind {
+        case diffview.RowContext:
+            marker = " "
+        case diffview.RowAdd, diffview.RowReplace:
+            marker = m.theme.AddText("+")
+            content = m.theme.AddText(content)
+        case diffview.RowDel:
+            marker = " "
+            content = ""
+        }
+    }
+    // Reserve 2 cols for marker and a space
+    if width <= 2 {
+        return []string{ansi.Truncate(marker+" ", width, "")}
+    }
+    bodyW := width - 2
+    wrapped := ansi.Hardwrap(content, bodyW, false)
+    parts := strings.Split(wrapped, "\n")
+    out := make([]string, 0, len(parts))
+    for _, p := range parts {
+        out = append(out, marker+" "+padExact(p, bodyW))
+    }
+    if len(out) == 0 {
+        out = append(out, marker+" "+strings.Repeat(" ", bodyW))
+    }
+    return out
+}
+
+// sliceANSI returns a substring of s starting at visual column `start` with at most `w` columns, preserving ANSI escapes.
+func sliceANSI(s string, start, w int) string {
+    if start <= 0 {
+        return ansi.Truncate(s, w, "")
+    }
+    // First keep only the left portion up to start+w, then drop the first `start` columns.
+    head := ansi.Truncate(s, start+w, "")
+    return ansi.TruncateLeft(head, w, "")
+}
+
+// clipToWidth trims the string to at most w cells without ellipsis.
+func clipToWidth(s string, w int) string {
+    if w <= 0 { return "" }
+    return ansi.Truncate(s, w, "")
+}
+
+// padExact pads s with spaces to exactly width w (ANSI-aware width).
+func padExact(s string, w int) string {
+    sw := lipgloss.Width(s)
+    if sw >= w { return s }
+    return s + strings.Repeat(" ", w-sw)
+}
+
 func isMovementKey(key string) bool{
-	return key == "j" || key == "k"
+    return key == "j" || key == "k"
 }
 
 func isNumericKey(key string) bool{
-	return key <= "9" && key >= "0"
+    return key <= "9" && key >= "0"
 }
