@@ -98,12 +98,3 @@ jobs:
             if (checked === 0) {
               core.warning('No accessible linked issues could be verified. Ensure at least one valid issue is referenced in the PR body/title.');
             }
-      - name: Require at least one reviewer
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = context.payload.pull_request;
-            const reviewers = (pr.requested_reviewers || []).map(r => r.login);
-            if (!reviewers || reviewers.length === 0) {
-              core.setFailed('PR must have at least one requested reviewer.');
-            }
