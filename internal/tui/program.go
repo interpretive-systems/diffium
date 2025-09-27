@@ -34,6 +34,7 @@ type model struct {
     selected    int
     rows        []diffview.Row
     sideBySide  bool
+    diffMode    string
     width       int
     height      int
     status      string
@@ -130,7 +131,7 @@ type diffMsg struct {
 
 // Run instantiates and runs the Bubble Tea program.
 func Run(repoRoot string) error {
-    m := model{repoRoot: repoRoot, sideBySide: true, theme: loadThemeFromRepo(repoRoot)}
+    m := model{repoRoot: repoRoot, sideBySide: true, diffMode: "head", theme: loadThemeFromRepo(repoRoot)}
     p := tea.NewProgram(m, tea.WithAltScreen())
     if _, err := p.Run(); err != nil {
         return err
@@ -139,7 +140,7 @@ func Run(repoRoot string) error {
 }
 
 func (m model) Init() tea.Cmd {
-    return tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), loadPrefs(m.repoRoot), tickOnce())
+    return tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), loadPrefs(m.repoRoot), tickOnce())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -260,7 +261,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.rows = nil
                 // Reset scroll for new file
                 m.rightVP.GotoTop()
-                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
+                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
             }
         case "k", "up":
             if len(m.files) == 0 {
@@ -281,21 +282,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
                 m.rows = nil
                 m.rightVP.GotoTop()
-                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
+                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
             }
         case "g":
             if len(m.files) > 0 {
                 m.selected = 0
                 m.rows = nil
                 m.rightVP.GotoTop()
-                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
+                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
             }
         case "G":
             if len(m.files) > 0 {
                 m.selected = len(m.files) - 1
                 m.rows = nil
                 m.rightVP.GotoTop()
-                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
+                return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
             }
         case "[":
             // Page up left pane
@@ -336,11 +337,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "N":
             return m, (&m).advanceSearch(-1)
         case "r":
-            return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentDiff(m))
+            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadCurrentDiff(m))
         case "s":
             m.sideBySide = !m.sideBySide
             _ = prefs.SaveSideBySide(m.repoRoot, m.sideBySide)
             return m, m.recalcViewport()
+        case "t":
+            if m.diffMode == "head" {
+                m.diffMode = "staged"
+            } else {
+                m.diffMode = "head"
+            }
+            m.rows = nil
+            m.selected = 0
+            m.rightVP.GotoTop()
+            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
         case "w":
             // Toggle wrap in diff pane
             m.wrapLines = !m.wrapLines
@@ -409,7 +420,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         return m, m.recalcViewport()
     case tickMsg:
         // Periodic refresh
-        return m, tea.Batch(loadFiles(m.repoRoot), loadCurrentBranch(m.repoRoot), tickOnce())
+        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadCurrentBranch(m.repoRoot), tickOnce())
     case filesMsg:
         if msg.err != nil {
             m.status = fmt.Sprintf("status error: %v", msg.err)
@@ -438,7 +449,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         }
         // Load diff for selected if exists
         if len(m.files) > 0 {
-            return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path), m.recalcViewport())
+            return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
         }
         m.rows = nil
         return m, m.recalcViewport()
@@ -494,7 +505,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.plDone = true
         m.showPull = true
         // Refresh repo state after pull
-        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
     case branchListMsg:
         if msg.err != nil {
             m.brErr = msg.err.Error()
@@ -523,7 +534,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.brDone = true
         m.showBranch = false
         // refresh files after checkout
-        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
     case rcPreviewMsg:
         m.rcPreviewErr = ""
         if msg.err != nil {
@@ -538,12 +549,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if msg.err != nil {
             m.rcErr = msg.err.Error()
             m.rcDone = false
-            return m, tea.Batch(loadFiles(m.repoRoot), m.recalcViewport())
+            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
         }
         m.rcErr = ""
         m.rcDone = true
         m.showResetClean = false
-        return m, tea.Batch(loadFiles(m.repoRoot), m.recalcViewport())
+        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
     case commitProgressMsg:
         m.committing = true
         m.commitErr = ""
@@ -554,13 +565,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.commitErr = msg.err.Error()
             m.commitDone = false
             // refresh even on error (commit may have succeeded but push failed)
-            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
         } else {
             m.commitErr = ""
             m.commitDone = true
             m.showCommit = false
             // refresh changes and last commit
-            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
         }
         return m, nil
     case uncommitFilesMsg:
@@ -594,12 +605,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if msg.err != nil {
             m.uncommitErr = msg.err.Error()
             m.uncommitDone = false
-            return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
         }
         m.uncommitErr = ""
         m.uncommitDone = true
         m.showUncommit = false
-        return m, tea.Batch(loadFiles(m.repoRoot), loadLastCommit(m.repoRoot), m.recalcViewport())
+        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
     }
     return m, nil
 }
@@ -810,9 +821,9 @@ func (m model) rightBodyLines(max, width int) []string {
 
 func (m model) topRightTitle() string {
     if len(m.files) == 0 {
-        return ""
+        return fmt.Sprintf("[%s]", strings.ToUpper(m.diffMode))
     }
-    header := fmt.Sprintf("%s (%s)", m.files[m.selected].Path, fileStatusLabel(m.files[m.selected]))
+    header := fmt.Sprintf("%s (%s) [%s]", m.files[m.selected].Path, fileStatusLabel(m.files[m.selected]), strings.ToUpper(m.diffMode))
     return header
 }
 
@@ -863,16 +874,40 @@ func fileStatusLabel(f gitx.FileChange) string {
     return strings.Join(tags, "")
 }
 
-func loadFiles(repoRoot string) tea.Cmd {
+func loadFiles(repoRoot, diffMode string) tea.Cmd {
     return func() tea.Msg {
-        files, err := gitx.ChangedFiles(repoRoot)
-        return filesMsg{files: files, err: err}
+        allFiles, err := gitx.ChangedFiles(repoRoot)
+        if err != nil {
+            return filesMsg{files: nil, err: err}
+        }
+
+        // Filter files based on diff mode
+        var filteredFiles []gitx.FileChange
+        for _, file := range allFiles {
+            if diffMode == "staged" {
+                if file.Staged {
+                    filteredFiles = append(filteredFiles, file)
+                }
+            } else {
+                if file.Unstaged || file.Untracked {
+                    filteredFiles = append(filteredFiles, file)
+                }
+            }
+        }
+
+        return filesMsg{files: filteredFiles, err: nil}
     }
 }
 
-func loadDiff(repoRoot, path string) tea.Cmd {
+func loadDiff(repoRoot, path, diffMode string) tea.Cmd {
     return func() tea.Msg {
-        d, err := gitx.DiffHEAD(repoRoot, path)
+        var d string
+        var err error
+        if diffMode == "staged" {
+            d, err = gitx.DiffStaged(repoRoot, path)
+        } else {
+            d, err = gitx.DiffHEAD(repoRoot, path)
+        }
         if err != nil {
             return diffMsg{path: path, err: err}
         }
@@ -885,7 +920,7 @@ func loadCurrentDiff(m model) tea.Cmd {
     if len(m.files) == 0 {
         return nil
     }
-    return loadDiff(m.repoRoot, m.files[m.selected].Path)
+    return loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode)
 }
 
 func tickOnce() tea.Cmd {
@@ -1035,6 +1070,7 @@ func (m model) helpOverlayLines(width int) []string {
         "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
         "s              Toggle side-by-side / inline",
+        "t              Toggle HEAD / staged diffs",
         "w              Toggle line wrap (diff)",
         "r              Refresh now",
         "g / G          Top / Bottom",
