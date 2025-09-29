@@ -138,6 +138,24 @@ func DiffHEAD(repoRoot, path string) (string, error) {
     return string(b), nil
 }
 
+// DiffStaged returns a unified diff between HEAD and the staged version for a single file.
+func DiffStaged(repoRoot, path string) (string, error) {
+    var args []string
+    if isTracked(repoRoot, path) {
+        args = []string{"-C", repoRoot, "diff", "--no-color", "--text", "--cached", "HEAD", "--", path}
+    } else {
+        args = []string{"-C", repoRoot, "diff", "--no-color", "--cached", "--text", "/dev/null", path}
+    }
+    cmd := exec.Command("git", args...)
+    b, err := cmd.CombinedOutput()
+    if err != nil {
+        if len(b) == 0 {
+            return "", fmt.Errorf("git diff --cached: %w", err)
+        }
+    }
+    return string(b), nil
+}
+
 func isBinary(repoRoot, path string) bool {
     var args []string
     if isTracked(repoRoot, path) {
