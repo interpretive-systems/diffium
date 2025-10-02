@@ -439,3 +439,14 @@ func CurrentBranch(repoRoot string) (string, error) {
     }
     return strings.TrimSpace(string(b)), nil
 }
+
+func Log(repoRoot string, options... string) ([]string, error) {
+    args := append([]string{"-C", repoRoot, "log"}, options...)
+    cmd := exec.Command("git", args...)
+
+    b, err := cmd.Output()
+    if err != nil {
+        return nil, fmt.Errorf("git log %s: %w", strings.Join(options, " "),err)
+    }
+    return strings.Split(string(b), "\n"), nil
+}

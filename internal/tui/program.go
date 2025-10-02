@@ -347,8 +347,10 @@ func (p *Program) executeAction(action KeyAction, count int) (tea.Model, tea.Cmd
             line := p.state.SearchEngine.CurrentMatchLine()
             p.scrollToLine(line)
         }
+    case ActionOpenRevert:
+		cmd := p.openWizard("revert")
+        return p, tea.Batch(cmd, p.recalcViewport())
     }
-    
     return p, nil
 }
 

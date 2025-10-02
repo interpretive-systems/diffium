@@ -42,6 +42,7 @@ const (
     ActionAdjustLeftWider
     ActionSearchNext
     ActionSearchPrevious
+    ActionOpenRevert
 )
 
 // KeyHandler handles key input and maintains key buffer.
@@ -161,6 +162,8 @@ func (k *KeyHandler) keyToAction(key string) KeyAction {
         return ActionSearchNext
     case "N":
         return ActionSearchPrevious
+    case "V":
+        return ActionOpenRevert
     default:
         return ActionNone
     }

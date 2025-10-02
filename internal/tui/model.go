@@ -1,12 +1,12 @@
 package tui
 
 import (
-    "time"
-    
-    "github.com/interpretive-systems/diffium/internal/gitx"
-    "github.com/interpretive-systems/diffium/internal/tui/components"
-    "github.com/interpretive-systems/diffium/internal/tui/search"
-    "github.com/interpretive-systems/diffium/internal/tui/wizards"
+	"time"
+
+	"github.com/interpretive-systems/diffium/internal/gitx"
+	"github.com/interpretive-systems/diffium/internal/tui/components"
+	"github.com/interpretive-systems/diffium/internal/tui/search"
+	"github.com/interpretive-systems/diffium/internal/tui/wizards"
 	"github.com/interpretive-systems/diffium/internal/theme"
 )
 
@@ -64,6 +64,7 @@ func NewState(repoRoot string) *State {
             "branch":     wizards.NewBranchWizard(),
             "resetclean": wizards.NewResetCleanWizard(),
             "pull":       wizards.NewPullWizard(),
+            "revert":     wizards.NewRevertWizard(),
         },
     }
 }
