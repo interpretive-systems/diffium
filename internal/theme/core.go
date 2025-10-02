@@ -1,8 +1,8 @@
-package tui
+package theme
 
 import (
+	"os"
     "encoding/json"
-    "os"
     "path/filepath"
 
     "github.com/charmbracelet/lipgloss"
@@ -16,7 +16,7 @@ type Theme struct {
     DividerColor string `json:"dividerColor"` // e.g. "240"
 }
 
-func defaultTheme() Theme {
+func DefaultTheme() Theme {
     return Theme{
         AddColor:     "34",
         DelColor:     "196",
@@ -26,8 +26,8 @@ func defaultTheme() Theme {
 }
 
 // loadThemeFromRepo tries .diffium/theme.json at repoRoot.
-func loadThemeFromRepo(repoRoot string) Theme {
-    t := defaultTheme()
+func LoadThemeFromRepo(repoRoot string) Theme {
+    t := DefaultTheme()
     path := filepath.Join(repoRoot, ".diffium", "theme.json")
     b, err := os.ReadFile(path)
     if err != nil {
@@ -64,4 +64,3 @@ func (t Theme) DelText(s string) string {
 func (t Theme) DividerText(s string) string {
     return lipgloss.NewStyle().Foreground(lipgloss.Color(t.DividerColor)).Render(s)
 }
-
