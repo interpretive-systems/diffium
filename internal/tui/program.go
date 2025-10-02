@@ -1902,10 +1902,8 @@ func (m model) rightBodyLinesAll(width int) []string {
                 } else {
                     l := m.renderSideCell(r, "left", colsW)
                     rr := m.renderSideCell(r, "right", colsW)
-                    if m.rightXOffset > 0 {
-                        l = padExact(l, colsW)
-                        rr = padExact(rr, colsW)
-                    }
+                    l = padExact(l, colsW)
+                    rr = padExact(rr, colsW)
                     lines = append(lines, l+mid+rr)
                 }
             }
@@ -2606,9 +2604,8 @@ func (m model) renderSideCell(r diffview.Row, side string, width int) string {
     bodyW := width - 2
 
     clipped := sliceANSI(content, m.rightXOffset, bodyW)
-    body := padExact(clipped, bodyW - m.rightXOffset)
     
-    return marker + " " + body
+    return marker + " " + clipped
 }
 
 // renderSideCellWrap renders a cell like renderSideCell but wraps the content
