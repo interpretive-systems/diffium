@@ -1,21 +1,21 @@
 package tui
 
 import (
-    "fmt"
-    "sort"
-    "strings"
+	"fmt"
+	"sort"
 	"strconv"
-    "time"
+	"strings"
+	"time"
 	"unicode/utf8"
 
-    "github.com/charmbracelet/bubbles/textinput"
-    "github.com/charmbracelet/bubbles/viewport"
-    tea "github.com/charmbracelet/bubbletea"
-    "github.com/charmbracelet/lipgloss"
-    "github.com/charmbracelet/x/ansi"
-    "github.com/interpretive-systems/diffium/internal/diffview"
-    "github.com/interpretive-systems/diffium/internal/gitx"
-    "github.com/interpretive-systems/diffium/internal/prefs"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/interpretive-systems/diffium/internal/diffview"
+	"github.com/interpretive-systems/diffium/internal/gitx"
+	"github.com/interpretive-systems/diffium/internal/prefs"
 )
 
 const (
@@ -1902,12 +1902,8 @@ func (m model) rightBodyLinesAll(width int) []string {
                 } else {
                     l := m.renderSideCell(r, "left", colsW)
                     rr := m.renderSideCell(r, "right", colsW)
-                    if m.rightXOffset > 0 {
-                        l = sliceANSI(l, m.rightXOffset, colsW)
-                        rr = sliceANSI(rr, m.rightXOffset, colsW)
-                        l = padExact(l, colsW)
-                        rr = padExact(rr, colsW)
-                    }
+                    l = padExact(l, colsW)
+                    rr = padExact(rr, colsW)
                     lines = append(lines, l+mid+rr)
                 }
             }
@@ -2606,14 +2602,10 @@ func (m model) renderSideCell(r diffview.Row, side string, width int) string {
         return ansi.Truncate(marker+" ", width, "")
     }
     bodyW := width - 2
-    // First clip right side to avoid wrapping
-    clipped := clipToWidth(content, bodyW)
-    // Then apply horizontal slice if any
-    if m.rightXOffset > 0 {
-        clipped = sliceANSI(clipped, m.rightXOffset, bodyW)
-    }
-    body := padExact(clipped, bodyW)
-    return marker + " " + body
+
+    clipped := sliceANSI(content, m.rightXOffset, bodyW)
+    
+    return marker + " " + clipped
 }
 
 // renderSideCellWrap renders a cell like renderSideCell but wraps the content
@@ -2672,13 +2664,7 @@ func sliceANSI(s string, start, w int) string {
     }
     // First keep only the left portion up to start+w, then drop the first `start` columns.
     head := ansi.Truncate(s, start+w, "")
-    return ansi.TruncateLeft(head, w, "")
-}
-
-// clipToWidth trims the string to at most w cells without ellipsis.
-func clipToWidth(s string, w int) string {
-    if w <= 0 { return "" }
-    return ansi.Truncate(s, w, "")
+    return ansi.TruncateLeft(head, start, "")
 }
 
 // padExact pads s with spaces to exactly width w (ANSI-aware width).
