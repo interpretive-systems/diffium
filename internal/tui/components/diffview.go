@@ -179,15 +179,11 @@ func (d *DiffView) renderSideBySide(width int) []string {
                     lines = append(lines, l+mid+rr)
                 }
             } else {
-                l := d.renderSideCell(r, "left", colsW)
-                rr := d.renderSideCell(r, "right", colsW)
-                if d.xOffset > 0 {
-                    l = tuiansi.SliceHorizontal(l, d.xOffset, colsW)
-                    rr = tuiansi.SliceHorizontal(rr, d.xOffset, colsW)
-                    l = tuiansi.PadExact(l, colsW)
-                    rr = tuiansi.PadExact(rr, colsW)
-                }
-                lines = append(lines, l+mid+rr)
+				l := d.renderSideCell(r, "left", colsW)
+				rr := d.renderSideCell(r, "right", colsW)
+				l = tuiansi.PadExact(l, colsW)
+				rr = tuiansi.PadExact(rr, colsW)
+				lines = append(lines, l+mid+rr)
             }
         }
     }
@@ -306,9 +302,9 @@ func (d *DiffView) renderSideCell(r diffview.Row, side string, width int) string
     }
     
     bodyW := width - 2
-    clipped := tuiansi.ClipToWidth(content, bodyW)
-    body := tuiansi.PadExact(clipped, bodyW)
-    return marker + " " + body
+
+	clipped := tuiansi.SliceHorizontal(content, d.xOffset, bodyW)
+    return marker + " " + clipped
 }
 
 func (d *DiffView) renderSideCellWrap(r diffview.Row, side string, width int) []string {

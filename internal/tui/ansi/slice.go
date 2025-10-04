@@ -13,7 +13,7 @@ func SliceHorizontal(s string, start, width int) string {
         return ansi.Truncate(s, width, "")
     }
     head := ansi.Truncate(s, start+width, "")
-    return ansi.TruncateLeft(head, width, "")
+    return ansi.TruncateLeft(head, start, "")
 }
 
 // ClipToWidth truncates string to at most w visual columns without ellipsis.
