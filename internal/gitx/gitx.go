@@ -1,13 +1,14 @@
 package gitx
 
 import (
-    "bytes"
-    "errors"
-    "fmt"
-    "os/exec"
-    "path/filepath"
-    "sort"
-    "strings"
+	"bytes"
+	"errors"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 )
 
 // FileChange represents a changed file in the repo.
@@ -18,6 +19,20 @@ type FileChange struct {
     Untracked bool
     Binary    bool
     Deleted   bool
+}
+
+// CommitInfo represents single git commit
+type CommitInfo struct {
+	ID              string
+	AbbreviatedHash string
+	Message         string
+	AuthorEmail     string
+	AuthorName      string
+	AuthorDate      time.Time
+	CommitterName   string
+	CommitterEmail  string
+	CommitterDate   string
+	Body            string
 }
 
 // RepoRoot resolves the git repository root from a given path (or current dir).
@@ -438,4 +453,104 @@ func CurrentBranch(repoRoot string) (string, error) {
         return "", fmt.Errorf("git rev-parse --abbrev-ref HEAD: %w", err)
     }
     return strings.TrimSpace(string(b)), nil
+}
+
+// ListCommits returns a slice of commits in reverse chronological order (latest first).
+// The `from` and `to` parameters define a range of commits to fetch. This prevents
+// loading thousands of commits at once, which could consume excessive memory.
+// Example: ListCommits("/path/to/repo", 0, 50) retrieves the latest 50 commits.
+func ListCommits(repoRoot string, from int, to int) ([]CommitInfo, error) {
+	if from < 0 || to < 0 || to < from {
+		return nil, fmt.Errorf("invalid range: from=%d, to=%d", from, to)
+	}
+
+	const sep = "<--END-->"
+	format := strings.Join([]string{
+		"%H",  // full hash
+		"%s",  // subject line
+		"%ae", // author email
+		"%an", // author name
+		"%ad", // author date
+		"%cn", // committer name
+		"%ce", // committer email
+		"%cd", // committer date
+		"%b",  // body (commit description)
+		"%h",  // abbreviated hash
+	}, "%n") + "%n" + sep
+
+	count := to - from
+
+	args := []string{
+		"-C", repoRoot,
+		"log",
+		"--date=iso-strict",
+		"--skip", fmt.Sprint(from),
+		"-n", fmt.Sprint(count),
+		"--pretty=format:" + format,
+	}
+
+	cmd := exec.Command("git", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list commits failed: %w", err)
+	}
+
+	rawCommits := strings.Split(string(out), sep)
+	var commits []CommitInfo
+
+	for _, raw := range rawCommits {
+		lines := strings.Split(strings.TrimSpace(raw), "\n")
+		if len(lines) < 10 {
+			continue
+		}
+
+		authorDate, _ := time.Parse(time.RFC3339, strings.TrimSpace(lines[4]))
+
+		commits = append(commits, CommitInfo{
+			ID:              lines[0],
+			Message:         lines[1],
+			AuthorEmail:     lines[2],
+			AuthorName:      lines[3],
+			AuthorDate:      authorDate,
+			CommitterName:   lines[5],
+			CommitterEmail:  lines[6],
+			CommitterDate:   lines[7],
+			Body:            strings.TrimSpace(strings.Join(lines[8:len(lines)-1], "\n")),
+			AbbreviatedHash: strings.TrimSpace(lines[len(lines)-1]),
+		})
+	}
+
+	return commits, nil
+}
+
+// RevertBack reverts all commits made after the specified commit hash (exclusive).
+// Internally, it runs `git revert --no-edit <hash>..HEAD` to undo subsequent changes.
+// Note: This creates new "revert" commits instead of rewriting history.
+func RevertBack(repoRoot string, hash string) error {
+	if hash == "" {
+		return fmt.Errorf("hash cannot be empty")
+	}
+
+	args := []string{
+		"-C", repoRoot,
+		"revert",
+		"--no-edit",
+		hash + "..HEAD",
+	}
+	cmd := exec.Command("git", args...)
+
+	b, err := cmd.Output()
+
+	if err != nil {
+		return fmt.Errorf("git revert %s..HEAD: %w :%s", hash, err, string(b))
+	}
+
+	return nil
+}
+
+// RevertPreview shows a what would change if the repository were reverted
+// back to the specified commit. This runs a `git diff HEAD <hash>` internally to
+// preview the potential modifications before actually reverting.
+func RevertPreview(repoRoot, hash string) ([]string, error) {
+	return listNames(repoRoot, []string{"diff", "HEAD", hash})
 }

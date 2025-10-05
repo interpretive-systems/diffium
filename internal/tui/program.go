@@ -113,6 +113,16 @@ type model struct {
     searchQuery   string
     searchMatches []int
     searchIndex   int
+		
+    // revert wizard
+    showRevert      bool
+    revertStep      int // 0: list commits, 1: preview, 2: confirm
+    rwCommits       []gitx.CommitInfo
+    rwSelected      int
+    rwPreview       []string // preview of what will be changed
+    reverting       bool
+    revertErr       string
+    revertDone      bool
 }
 
 // messages
@@ -176,7 +186,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showPull {
             return m.handlePullKeys(msg)
         }
-
+        if m.showRevert {
+            return m.handleRevertKeys(msg)
+        }
         key := msg.String()
 
         if isNumericKey(key){
@@ -214,6 +226,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             // Open reset/clean wizard
             m.openResetCleanWizard()
             return m, m.recalcViewport()
+        case "V":
+			// Open revert wizard
+			m.openRevertWizard()
+			return m, m.recalcViewport()
         case "/":
             (&m).openSearch()
             return m, m.recalcViewport()
@@ -611,6 +627,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.uncommitDone = true
         m.showUncommit = false
         return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+    case revertResultMessage:
+		m.reverting = false
+		if msg.err != nil {
+			m.revertErr = msg.err.Error()
+			m.revertDone = false
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+		}
+		m.revertErr = ""
+		m.revertDone = true
+		m.showRevert = false
     }
     return m, nil
 }
@@ -676,6 +702,9 @@ func (m model) View() string {
     if m.showPull {
         overlay = append(overlay, m.pullOverlayLines(m.width)...)
     }
+    if m.showRevert {
+		overlay = append(overlay, m.revertOverlayLines(m.width)...)
+	}
     if m.searchActive {
         overlay = append(overlay, m.searchOverlayLines(m.width)...)
     }
@@ -1069,6 +1098,7 @@ func (m model) helpOverlayLines(width int) []string {
         "u              Uncommit (open wizard)",
         "R              Reset/Clean (open wizard)",
         "c              Commit & push (open wizard)",
+        "V              Revert (open wizard)",
         "s              Toggle side-by-side / inline",
         "t              Toggle HEAD / staged diffs",
         "w              Toggle line wrap (diff)",
@@ -2680,4 +2710,155 @@ func isMovementKey(key string) bool{
 
 func isNumericKey(key string) bool{
     return key <= "9" && key >= "0"
+}
+
+
+// Revert Wizard
+
+// handle revert wizard keys
+func (m model) handleRevertKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.revertStep {
+	case 0: // list commits
+		switch key.String() {
+		case "esc":
+			m.showRevert = false
+			return m, m.recalcViewport()
+		case "enter":
+			m.revertStep = 1
+			// load preview
+			m.loadRevertPreview()
+			return m, m.recalcViewport()
+		case "j", "down":
+			if len(m.rwCommits) > 0 && m.rwSelected < len(m.rwCommits)-1 {
+				m.rwSelected++
+			}
+			return m, nil
+		case "k", "up":
+			if m.rwSelected > 0 {
+				m.rwSelected--
+			}
+			return m, nil
+		}
+	case 1: // preview
+		switch key.String() {
+		case "esc":
+			m.showRevert = false
+			return m, m.recalcViewport()
+		case "b":
+			m.revertStep = 0
+			return m, m.recalcViewport()
+		case "enter":
+			m.revertStep = 2
+			m.revertDone = false
+			m.revertErr = ""
+			m.reverting = false
+			return m, m.recalcViewport()
+		}
+	case 2: // confirm/progress
+		switch key.String() {
+		case "esc":
+			// can't cancel mid-revert, but if not running: exit
+			if !m.reverting {
+				m.showRevert = false
+				return m, m.recalcViewport()
+			}
+			return m, nil
+		case "b":
+			if !m.reverting && !m.revertDone {
+				m.revertStep = 1
+				return m, m.recalcViewport()
+			}
+			return m, nil
+		case "y", "enter":
+			if !m.reverting && !m.revertDone {
+				m.revertErr = ""
+				m.reverting = true
+				return m, runRevertBack(m.repoRoot, m.rwCommits[m.rwSelected].ID)
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m model) revertOverlayLines(width int) []string {
+	if !m.showRevert {
+		return nil
+	}
+	lines := make([]string, 0, 64)
+	lines = append(lines, strings.Repeat("─", width))
+	switch m.revertStep {
+	case 0:
+		title := lipgloss.NewStyle().Bold(true).Render("Revert — Select commmit (enter: continue, esc: cancel)")
+		lines = append(lines, title)
+		if len(m.rwCommits) == 0 {
+			lines = append(lines, lipgloss.NewStyle().Faint(true).Render("No commits to revert to."))
+			return lines
+		}
+		for i, c := range m.rwCommits {
+			cur := "  "
+			if i == m.rwSelected {
+				cur = "> "
+			}
+			mark := "[ ]"
+			if i == m.rwSelected {
+				mark = "[x]"
+			}
+			lines = append(lines, fmt.Sprintf("%s%s %s %s", cur, mark, c.AbbreviatedHash, c.Message))
+		}
+	case 1:
+		title := lipgloss.NewStyle().Bold(true).Render("Revert — Preview (enter: continue, b: back, esc: cancel)")
+		lines = append(lines, title)
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render("The following changes will be done:"))
+		lines = append(lines, m.rwPreview...)
+	case 2:
+		title := lipgloss.NewStyle().Bold(true).Render("Revert - Confirm (y/enter: execute, b: back, esc: cancel)")
+		lines = append(lines, title)
+        lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render(fmt.Sprintf("Please Confirm:")))
+		if m.reverting {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Reverting..."))
+		}
+		if m.revertErr != "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("Error: ")+m.revertErr)
+		}
+	}
+	return lines
+}
+
+func (m *model) openRevertWizard() {
+	m.showRevert = true
+	// TODO: move to constant
+	commits, err := gitx.ListCommits(m.repoRoot, 0, 20)
+	if err != nil {
+		m.revertErr = err.Error()
+	}
+	m.rwCommits = commits
+	m.revertStep = 0
+	m.rwSelected = 0
+	m.revertErr = ""
+	m.revertDone = false
+	m.reverting = false
+}
+
+func (m *model) loadRevertPreview() {
+	preview, err := gitx.RevertPreview(m.repoRoot, m.rwCommits[m.rwSelected].ID)
+	if err != nil {
+		m.revertErr = err.Error()
+		m.revertStep = 2
+		return
+	}
+	m.rwPreview = preview
+}
+
+type revertResultMessage struct {
+	err error
+}
+
+func runRevertBack(repoRoot string, hash string) tea.Cmd {
+	return func() tea.Msg {
+		err := gitx.RevertBack(repoRoot, hash)
+		return revertResultMessage{
+			err: err,
+		}
+	}
 }
