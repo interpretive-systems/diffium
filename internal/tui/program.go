@@ -62,7 +62,7 @@ type model struct {
     commitErr   string
     commitDone  bool
     lastCommit  string
-    
+
     currentBranch string
     // uncommit wizard state
     showUncommit   bool
@@ -106,7 +106,7 @@ type model struct {
     plErr      string
     plDone     bool
     plOutput   string
-    
+
     // search state
     searchActive  bool
     searchInput   textinput.Model
@@ -130,8 +130,31 @@ type diffMsg struct {
 }
 
 // Run instantiates and runs the Bubble Tea program.
-func Run(repoRoot string) error {
-    m := model{repoRoot: repoRoot, sideBySide: true, diffMode: "head", theme: loadThemeFromRepo(repoRoot)}
+// func Run(repoRoot, themeName string) error {
+//     baseTheme := "dark"
+//     if themeName != "" {
+//         baseTheme = themeName
+//
+//     }
+//     m := model{repoRoot: repoRoot, sideBySide: true, diffMode: "head", theme: loadThemeFromRepo(repoRoot, baseTheme)}
+//     p := tea.NewProgram(m, tea.WithAltScreen())
+//     if _, err := p.Run(); err != nil {
+//         return err
+//     }
+//     return nil
+// }
+
+// In /internal/tui/program.go
+
+// FIX: Change function signature to accept themeName
+func Run(repoRoot string, themeName string) error {
+    m := model{
+        repoRoot:   repoRoot,
+        sideBySide: true,
+        diffMode:   "head",
+        // FIX: Pass themeName to loadThemeFromRepo
+        theme:      loadThemeFromRepo(repoRoot, themeName),
+    }
     p := tea.NewProgram(m, tea.WithAltScreen())
     if _, err := p.Run(); err != nil {
         return err
@@ -1978,7 +2001,7 @@ func (m model) rightBodyLinesAll(width int) []string {
         }
     }
     return lines
-    
+
 }
 
 func (m *model) openSearch() {
@@ -2013,20 +2036,20 @@ func (m model) handleSearchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
             m.closeSearch()
             return m, m.recalcViewport()
         case "ctrl+c":
-            return m, tea.Quit    
+            return m, tea.Quit
     }
-	
-    
+
+
     // Navigation that does NOT leave input mode
     switch key.Type {
     case tea.KeyEnter:
         return m, (&m).advanceSearch(1)
-    case tea.KeyDown: 
+    case tea.KeyDown:
         return m, (&m).advanceSearch(1)
     case tea.KeyUp:
         return m, (&m).advanceSearch(-1)
     }
-	 
+
 
     // Fallback: always let input handle it
     var cmd tea.Cmd

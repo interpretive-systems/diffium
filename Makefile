@@ -14,3 +14,5 @@ run:
 fmt:
 	go fmt ./...
 
+theme-light:
+	go run ./cmd/diffium watch --theme light
