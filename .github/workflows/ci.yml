@@ -28,6 +28,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      - name: Format
+        run: go fmt ./...
+
       - name: Build
         run: go build ./...
 
