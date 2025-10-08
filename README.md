@@ -34,6 +34,7 @@ Watcher TUI that shows changed files on the left and a side-by-side diff on the 
 - `<`/`>` or `H`/`L`: adjust left pane width
 - `c`: open commit flow (overlay)
 - `q`: quit
+- `V`: open revert wizard (revert to a specified commit `git revert <commit_hash>..HEAD`)
 
 The top bar shows `Changes | <file>` with a horizontal rule below. The bottom bar shows `h: help` on the left and the last `refreshed` time on the right. Requires `git` in PATH. Binary files are listed but not rendered as text diffs yet.
 
