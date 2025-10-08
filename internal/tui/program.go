@@ -113,16 +113,16 @@ type model struct {
 	searchQuery   string
 	searchMatches []int
 	searchIndex   int
-		
-    // revert wizard
-    showRevert      bool
-    revertStep      int // 0: list commits, 1: preview, 2: confirm
-    rwCommits       []gitx.CommitInfo
-    rwSelected      int
-    rwPreview       []string // preview of what will be changed
-    reverting       bool
-    revertErr       string
-    revertDone      bool
+
+	// revert wizard
+	showRevert bool
+	revertStep int // 0: list commits, 1: preview, 2: confirm
+	rwCommits  []gitx.CommitInfo
+	rwSelected int
+	rwPreview  []string // preview of what will be changed
+	reverting  bool
+	revertErr  string
+	revertDone bool
 }
 
 // messages
@@ -186,9 +186,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showPull {
 			return m.handlePullKeys(msg)
 		}
-        if m.showRevert {
-            return m.handleRevertKeys(msg)
-        }
+		if m.showRevert {
+			return m.handleRevertKeys(msg)
+		}
 		key := msg.String()
 
 		if isNumericKey(key) {
@@ -210,59 +210,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "c":
 			// Open commit wizard
 			(&m).closeSearch()
-            m.openCommitWizard()
-            return m, m.recalcViewport()
-        case "u":
-            // Open uncommit wizard
-            m.openUncommitWizard()
-            return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
-        case "b":
-            m.openBranchWizard()
-            return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
-        case "p":
-            m.openPullWizard()
-            return m, m.recalcViewport()
-        case "R":
-            // Open reset/clean wizard
-            m.openResetCleanWizard()
-            return m, m.recalcViewport()
-        case "V":
+			m.openCommitWizard()
+			return m, m.recalcViewport()
+		case "u":
+			// Open uncommit wizard
+			m.openUncommitWizard()
+			return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
+		case "b":
+			m.openBranchWizard()
+			return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
+		case "p":
+			m.openPullWizard()
+			return m, m.recalcViewport()
+		case "R":
+			// Open reset/clean wizard
+			m.openResetCleanWizard()
+			return m, m.recalcViewport()
+		case "V":
 			// Open revert wizard
 			m.openRevertWizard()
 			return m, m.recalcViewport()
-        case "/":
-            (&m).openSearch()
-            return m, m.recalcViewport()
-        case "<", "H":
-            if m.leftWidth == 0 {
-                m.leftWidth = m.width / 3
-            }
-            m.leftWidth -= 2
-            if m.leftWidth < 20 {
-                m.leftWidth = 20
-            }
-            _ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
-            return m, m.recalcViewport()
-        case ">", "L":
-            if m.leftWidth == 0 {
-                m.leftWidth = m.width / 3
-            }
-            m.leftWidth += 2
-            maxLeft := m.width - 20
-            if maxLeft < 20 {
-                maxLeft = 20
-            }
-            if m.leftWidth > maxLeft {
-                m.leftWidth = maxLeft
-            }
-            _ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
-            return m, m.recalcViewport()
-        case "j", "down":
-            if len(m.files) == 0 {
-                return m, nil
-            }
-            if m.selected < len(m.files)-1 {
-				if(m.keyBuffer == ""){
+		case "/":
+			(&m).openSearch()
+			return m, m.recalcViewport()
+		case "<", "H":
+			if m.leftWidth == 0 {
+				m.leftWidth = m.width / 3
+			}
+			m.leftWidth -= 2
+			if m.leftWidth < 20 {
+				m.leftWidth = 20
+			}
+			_ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
+			return m, m.recalcViewport()
+		case ">", "L":
+			if m.leftWidth == 0 {
+				m.leftWidth = m.width / 3
+			}
+			m.leftWidth += 2
+			maxLeft := m.width - 20
+			if maxLeft < 20 {
+				maxLeft = 20
+			}
+			if m.leftWidth > maxLeft {
+				m.leftWidth = maxLeft
+			}
+			_ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
+			return m, m.recalcViewport()
+		case "j", "down":
+			if len(m.files) == 0 {
+				return m, nil
+			}
+			if m.selected < len(m.files)-1 {
+				if m.keyBuffer == "" {
 					m.selected++
 				} else {
 					jump, err := strconv.Atoi(m.keyBuffer)
@@ -483,181 +483,197 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files = msg.files
 		m.lastRefresh = time.Now()
 
-        // Reselect
-        m.selected = 0
-        if selPath != "" {
-            for i, f := range m.files {
-                if f.Path == selPath {
-                    m.selected = i
-                    break
-                }
-            }
-        }
-        // Load diff for selected if exists
-        if len(m.files) > 0 {
-            return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
-        }
-        m.rows = nil
-        return m, m.recalcViewport()
-    case diffMsg:
-        if msg.err != nil {
-            m.status = fmt.Sprintf("diff error: %v", msg.err)
-            m.rows = nil
-            return m, m.recalcViewport()
-        }
-        // Only update if this diff is for the currently selected file
-        if len(m.files) > 0 && m.files[m.selected].Path == msg.path {
-            m.rows = msg.rows
-        }
-        return m, m.recalcViewport()
-    case lastCommitMsg:
-        if msg.err == nil {
-            m.lastCommit = msg.summary
-        }
-        return m, nil
-    case currentBranchMsg:
-        if msg.err == nil {
-            m.currentBranch = msg.name
-        }
-        return m, nil
-    case prefsMsg:
-        if msg.err == nil {
-            if msg.p.SideSet { m.sideBySide = msg.p.SideBySide }
-            if msg.p.WrapSet { m.wrapLines = msg.p.Wrap; if m.wrapLines { m.rightXOffset = 0 } }
-            if msg.p.LeftSet {
-                m.savedLeftWidth = msg.p.LeftWidth
-                // If we already know the window size, apply immediately.
-                if m.width > 0 {
-                    lw := m.savedLeftWidth
-                    if lw < 24 { lw = 24 }
-                    maxLeft := m.width - 20
-                    if maxLeft < 20 { maxLeft = 20 }
-                    if lw > maxLeft { lw = maxLeft }
-                    m.leftWidth = lw
-                    return m, m.recalcViewport()
-                }
-            }
-        }
-        return m, nil
-    case pullResultMsg:
-        m.plRunning = false
-        // Always show result output in overlay; close with enter/esc
-        m.plOutput = msg.out
-        if msg.err != nil {
-            m.plErr = msg.err.Error()
-        } else {
-            m.plErr = ""
-        }
-        m.plDone = true
-        m.showPull = true
-        // Refresh repo state after pull
-        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
-    case branchListMsg:
-        if msg.err != nil {
-            m.brErr = msg.err.Error()
-            m.brBranches = nil
-            m.brCurrent = ""
-            m.brIndex = 0
-            return m, m.recalcViewport()
-        }
-        m.brBranches = msg.names
-        m.brCurrent = msg.current
-        m.brErr = ""
-        // Focus current if present
-        m.brIndex = 0
-        for i, n := range m.brBranches {
-            if n == m.brCurrent { m.brIndex = i; break }
-        }
-        return m, m.recalcViewport()
-    case branchResultMsg:
-        m.brRunning = false
-        if msg.err != nil {
-            m.brErr = msg.err.Error()
-            m.brDone = false
-            return m, m.recalcViewport()
-        }
-        m.brErr = ""
-        m.brDone = true
-        m.showBranch = false
-        // refresh files after checkout
-        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
-    case rcPreviewMsg:
-        m.rcPreviewErr = ""
-        if msg.err != nil {
-            m.rcPreviewErr = msg.err.Error()
-            m.rcPreviewLines = nil
-        } else {
-            m.rcPreviewLines = msg.lines
-        }
-        return m, m.recalcViewport()
-    case rcResultMsg:
-        m.rcRunning = false
-        if msg.err != nil {
-            m.rcErr = msg.err.Error()
-            m.rcDone = false
-            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
-        }
-        m.rcErr = ""
-        m.rcDone = true
-        m.showResetClean = false
-        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
-    case commitProgressMsg:
-        m.committing = true
-        m.commitErr = ""
-        return m, nil
-    case commitResultMsg:
-        m.committing = false
-        if msg.err != nil {
-            m.commitErr = msg.err.Error()
-            m.commitDone = false
-            // refresh even on error (commit may have succeeded but push failed)
-            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
-        } else {
-            m.commitErr = ""
-            m.commitDone = true
-            m.showCommit = false
-            // refresh changes and last commit
-            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
-        }
-        return m, nil
-    case uncommitFilesMsg:
-        if msg.err != nil {
-            m.uncommitErr = msg.err.Error()
-            m.ucFiles = nil
-            m.ucSelected = map[string]bool{}
-            m.ucIndex = 0
-            return m, m.recalcViewport()
-        }
-        m.ucFiles = msg.files
-        m.ucSelected = map[string]bool{}
-        for _, f := range m.ucFiles {
-            m.ucSelected[f.Path] = true
-        }
-        m.ucIndex = 0
-        return m, m.recalcViewport()
-    case uncommitEligibleMsg:
-        if msg.err != nil {
-            // No parent commit or other issue; treat as no eligible files.
-            m.ucEligible = map[string]bool{}
-            return m, m.recalcViewport()
-        }
-        m.ucEligible = map[string]bool{}
-        for _, p := range msg.paths {
-            m.ucEligible[p] = true
-        }
-        return m, m.recalcViewport()
-    case uncommitResultMsg:
-        m.uncommitting = false
-        if msg.err != nil {
-            m.uncommitErr = msg.err.Error()
-            m.uncommitDone = false
-            return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
-        }
-        m.uncommitErr = ""
-        m.uncommitDone = true
-        m.showUncommit = false
-        return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
-    case revertResultMessage:
+		// Reselect
+		m.selected = 0
+		if selPath != "" {
+			for i, f := range m.files {
+				if f.Path == selPath {
+					m.selected = i
+					break
+				}
+			}
+		}
+		// Load diff for selected if exists
+		if len(m.files) > 0 {
+			return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
+		}
+		m.rows = nil
+		return m, m.recalcViewport()
+	case diffMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("diff error: %v", msg.err)
+			m.rows = nil
+			return m, m.recalcViewport()
+		}
+		// Only update if this diff is for the currently selected file
+		if len(m.files) > 0 && m.files[m.selected].Path == msg.path {
+			m.rows = msg.rows
+		}
+		return m, m.recalcViewport()
+	case lastCommitMsg:
+		if msg.err == nil {
+			m.lastCommit = msg.summary
+		}
+		return m, nil
+	case currentBranchMsg:
+		if msg.err == nil {
+			m.currentBranch = msg.name
+		}
+		return m, nil
+	case prefsMsg:
+		if msg.err == nil {
+			if msg.p.SideSet {
+				m.sideBySide = msg.p.SideBySide
+			}
+			if msg.p.WrapSet {
+				m.wrapLines = msg.p.Wrap
+				if m.wrapLines {
+					m.rightXOffset = 0
+				}
+			}
+			if msg.p.LeftSet {
+				m.savedLeftWidth = msg.p.LeftWidth
+				// If we already know the window size, apply immediately.
+				if m.width > 0 {
+					lw := m.savedLeftWidth
+					if lw < 24 {
+						lw = 24
+					}
+					maxLeft := m.width - 20
+					if maxLeft < 20 {
+						maxLeft = 20
+					}
+					if lw > maxLeft {
+						lw = maxLeft
+					}
+					m.leftWidth = lw
+					return m, m.recalcViewport()
+				}
+			}
+		}
+		return m, nil
+	case pullResultMsg:
+		m.plRunning = false
+		// Always show result output in overlay; close with enter/esc
+		m.plOutput = msg.out
+		if msg.err != nil {
+			m.plErr = msg.err.Error()
+		} else {
+			m.plErr = ""
+		}
+		m.plDone = true
+		m.showPull = true
+		// Refresh repo state after pull
+		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+	case branchListMsg:
+		if msg.err != nil {
+			m.brErr = msg.err.Error()
+			m.brBranches = nil
+			m.brCurrent = ""
+			m.brIndex = 0
+			return m, m.recalcViewport()
+		}
+		m.brBranches = msg.names
+		m.brCurrent = msg.current
+		m.brErr = ""
+		// Focus current if present
+		m.brIndex = 0
+		for i, n := range m.brBranches {
+			if n == m.brCurrent {
+				m.brIndex = i
+				break
+			}
+		}
+		return m, m.recalcViewport()
+	case branchResultMsg:
+		m.brRunning = false
+		if msg.err != nil {
+			m.brErr = msg.err.Error()
+			m.brDone = false
+			return m, m.recalcViewport()
+		}
+		m.brErr = ""
+		m.brDone = true
+		m.showBranch = false
+		// refresh files after checkout
+		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+	case rcPreviewMsg:
+		m.rcPreviewErr = ""
+		if msg.err != nil {
+			m.rcPreviewErr = msg.err.Error()
+			m.rcPreviewLines = nil
+		} else {
+			m.rcPreviewLines = msg.lines
+		}
+		return m, m.recalcViewport()
+	case rcResultMsg:
+		m.rcRunning = false
+		if msg.err != nil {
+			m.rcErr = msg.err.Error()
+			m.rcDone = false
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
+		}
+		m.rcErr = ""
+		m.rcDone = true
+		m.showResetClean = false
+		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
+	case commitProgressMsg:
+		m.committing = true
+		m.commitErr = ""
+		return m, nil
+	case commitResultMsg:
+		m.committing = false
+		if msg.err != nil {
+			m.commitErr = msg.err.Error()
+			m.commitDone = false
+			// refresh even on error (commit may have succeeded but push failed)
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+		} else {
+			m.commitErr = ""
+			m.commitDone = true
+			m.showCommit = false
+			// refresh changes and last commit
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+		}
+		return m, nil
+	case uncommitFilesMsg:
+		if msg.err != nil {
+			m.uncommitErr = msg.err.Error()
+			m.ucFiles = nil
+			m.ucSelected = map[string]bool{}
+			m.ucIndex = 0
+			return m, m.recalcViewport()
+		}
+		m.ucFiles = msg.files
+		m.ucSelected = map[string]bool{}
+		for _, f := range m.ucFiles {
+			m.ucSelected[f.Path] = true
+		}
+		m.ucIndex = 0
+		return m, m.recalcViewport()
+	case uncommitEligibleMsg:
+		if msg.err != nil {
+			// No parent commit or other issue; treat as no eligible files.
+			m.ucEligible = map[string]bool{}
+			return m, m.recalcViewport()
+		}
+		m.ucEligible = map[string]bool{}
+		for _, p := range msg.paths {
+			m.ucEligible[p] = true
+		}
+		return m, m.recalcViewport()
+	case uncommitResultMsg:
+		m.uncommitting = false
+		if msg.err != nil {
+			m.uncommitErr = msg.err.Error()
+			m.uncommitDone = false
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+		}
+		m.uncommitErr = ""
+		m.uncommitDone = true
+		m.showUncommit = false
+		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+	case revertResultMessage:
 		m.reverting = false
 		if msg.err != nil {
 			m.revertErr = msg.err.Error()
@@ -667,8 +683,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.revertErr = ""
 		m.revertDone = true
 		m.showRevert = false
-    }
-    return m, nil
+	}
+	return m, nil
 }
 
 func (m model) View() string {
@@ -712,33 +728,33 @@ func (m model) View() string {
 	// Row 2: horizontal rule
 	hr := m.theme.DividerText(strings.Repeat("─", m.width))
 
-    // Row 3: columns, then optional overlays, then bottom rule + bar
-    var overlay []string
-    if m.showHelp {
-        overlay = m.helpOverlayLines(m.width)
-    }
-    if m.showCommit {
-        overlay = append(overlay, m.commitOverlayLines(m.width)...)
-    }
-    if m.showUncommit {
-        overlay = append(overlay, m.uncommitOverlayLines(m.width)...)
-    }
-    if m.showResetClean {
-        overlay = append(overlay, m.resetCleanOverlayLines(m.width)...)
-    }
-    if m.showBranch {
-        overlay = append(overlay, m.branchOverlayLines(m.width)...)
-    }
-    if m.showPull {
-        overlay = append(overlay, m.pullOverlayLines(m.width)...)
-    }
-    if m.showRevert {
+	// Row 3: columns, then optional overlays, then bottom rule + bar
+	var overlay []string
+	if m.showHelp {
+		overlay = m.helpOverlayLines(m.width)
+	}
+	if m.showCommit {
+		overlay = append(overlay, m.commitOverlayLines(m.width)...)
+	}
+	if m.showUncommit {
+		overlay = append(overlay, m.uncommitOverlayLines(m.width)...)
+	}
+	if m.showResetClean {
+		overlay = append(overlay, m.resetCleanOverlayLines(m.width)...)
+	}
+	if m.showBranch {
+		overlay = append(overlay, m.branchOverlayLines(m.width)...)
+	}
+	if m.showPull {
+		overlay = append(overlay, m.pullOverlayLines(m.width)...)
+	}
+	if m.showRevert {
 		overlay = append(overlay, m.revertOverlayLines(m.width)...)
 	}
-    if m.searchActive {
-        overlay = append(overlay, m.searchOverlayLines(m.width)...)
-    }
-    overlayH := len(overlay)
+	if m.searchActive {
+		overlay = append(overlay, m.searchOverlayLines(m.width)...)
+	}
+	overlayH := len(overlay)
 
 	contentHeight := m.height - 4 - overlayH // top + top rule + bottom rule + bottom bar
 	if contentHeight < 1 {
@@ -1133,39 +1149,39 @@ func (m *model) recalcViewport() tea.Cmd {
 
 // helpOverlayLines returns the bottom overlay lines (without trailing newline).
 func (m model) helpOverlayLines(width int) []string {
-    if !m.showHelp {
-        return nil
-    }
-    // Header
-    title := lipgloss.NewStyle().Bold(true).Render("Help — press 'h' or Esc to close")
-    // Keys
-    keys := []string{
-        "j/k or arrows  Move selection",
-        "J/K, PgDn/PgUp  Scroll diff",
-        "{/}            Horizontal scroll (diff)",
-        "</> or H/L      Adjust left pane width",
-        "[/]            Page left file list",
-        "b              Switch branch (open wizard)",
-        "p              Pull (open wizard)",
-        "u              Uncommit (open wizard)",
-        "R              Reset/Clean (open wizard)",
-        "c              Commit & push (open wizard)",
-        "V              Revert (open wizard)",
-        "s              Toggle side-by-side / inline",
-        "t              Toggle HEAD / staged diffs",
-        "w              Toggle line wrap (diff)",
-        "r              Refresh now",
-        "g / G          Top / Bottom",
-        "q              Quit",
-    }
-    lines := make([]string, 0, 2+len(keys))
-    // Overlay top rule
-    lines = append(lines, strings.Repeat("─", width))
-    lines = append(lines, title)
-    for _, k := range keys {
-        lines = append(lines, k)
-    }
-    return lines
+	if !m.showHelp {
+		return nil
+	}
+	// Header
+	title := lipgloss.NewStyle().Bold(true).Render("Help — press 'h' or Esc to close")
+	// Keys
+	keys := []string{
+		"j/k or arrows  Move selection",
+		"J/K, PgDn/PgUp  Scroll diff",
+		"{/}            Horizontal scroll (diff)",
+		"</> or H/L      Adjust left pane width",
+		"[/]            Page left file list",
+		"b              Switch branch (open wizard)",
+		"p              Pull (open wizard)",
+		"u              Uncommit (open wizard)",
+		"R              Reset/Clean (open wizard)",
+		"c              Commit & push (open wizard)",
+		"V              Revert (open wizard)",
+		"s              Toggle side-by-side / inline",
+		"t              Toggle HEAD / staged diffs",
+		"w              Toggle line wrap (diff)",
+		"r              Refresh now",
+		"g / G          Top / Bottom",
+		"q              Quit",
+	}
+	lines := make([]string, 0, 2+len(keys))
+	// Overlay top rule
+	lines = append(lines, strings.Repeat("─", width))
+	lines = append(lines, title)
+	for _, k := range keys {
+		lines = append(lines, k)
+	}
+	return lines
 }
 
 func (m model) commitOverlayLines(width int) []string {
@@ -2864,7 +2880,6 @@ func isNumericKey(key string) bool {
 	return key <= "9" && key >= "0"
 }
 
-
 // Revert Wizard
 
 // handle revert wizard keys
@@ -2966,7 +2981,7 @@ func (m model) revertOverlayLines(width int) []string {
 	case 2:
 		title := lipgloss.NewStyle().Bold(true).Render("Revert - Confirm (y/enter: execute, b: back, esc: cancel)")
 		lines = append(lines, title)
-        lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render(fmt.Sprintf("Please Confirm:")))
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220")).Render(fmt.Sprintf("Please Confirm:")))
 		if m.reverting {
 			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Reverting..."))
 		}
