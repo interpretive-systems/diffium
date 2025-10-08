@@ -1,14 +1,13 @@
 package main
 
 import (
-    "log"
+	"log"
 
-    "github.com/interpretive-systems/diffium/internal/cli"
+	"github.com/interpretive-systems/diffium/internal/cli"
 )
 
 func main() {
-    if err := cli.Execute(); err != nil {
-        log.Fatal(err)
-    }
+	if err := cli.Execute(); err != nil {
+		log.Fatal(err)
+	}
 }
-
