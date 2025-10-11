@@ -118,6 +118,8 @@ type model struct {
 // messages
 type tickMsg struct{}
 
+type clearStatusMsg struct{}
+
 type filesMsg struct {
 	files []gitx.FileChange
 	err   error
@@ -448,6 +450,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.recalcViewport()
+	case clearStatusMsg:
+		m.status = ""
+		return m, nil
 	case tickMsg:
 		// Periodic refresh
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadCurrentBranch(m.repoRoot), tickOnce())
@@ -570,16 +575,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.recalcViewport()
 	case branchResultMsg:
-		m.brRunning = false
 		if msg.err != nil {
 			m.brErr = msg.err.Error()
-			m.brDone = false
+			m.status = msg.out
 			return m, m.recalcViewport()
 		}
-		m.brErr = ""
-		m.brDone = true
+
+		// successful branch change
+		statusText := strings.TrimSpace(msg.out)
+		if statusText == "" {
+			if m.brStep == 3 {
+				statusText = fmt.Sprintf("Created and switched to branch '%s'", m.brInput.Value())
+			} else {
+				statusText = fmt.Sprintf("Switched to branch '%s'", m.brBranches[m.brIndex])
+			}
+		} else {
+			statusText = "" + statusText
+		}
+		// Add diff summary
+		if summary, err := gitx.DiffSummary(m.repoRoot); err == nil && summary != "" {
+			statusText += "\n" + summary
+		}
+		m.status = statusText
 		m.showBranch = false
-		// refresh files after checkout
+		// Clear status after delay using bubble tea timer
+		return m, tea.Batch(
+			loadFiles(m.repoRoot, m.diffMode),
+			loadLastCommit(m.repoRoot),
+			loadCurrentBranch(m.repoRoot),
+			m.recalcViewport(),
+			tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return clearStatusMsg{}
+			}),
+		)
+		m.brIndex = 0
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
 	case rcPreviewMsg:
 		m.rcPreviewErr = ""
@@ -882,14 +911,20 @@ func (m model) topRightTitle() string {
 }
 
 func (m model) bottomBar() string {
-	leftText := "h: help"
-	if m.keyBuffer != "" {
-		leftText = m.keyBuffer
+	var leftRendered string
+	if m.status != "" {
+		// If we have a status message, show it prominently
+		leftRendered = lipgloss.NewStyle().Bold(true).Render(m.status)
+	} else {
+		baseText := "h: help"
+		if m.keyBuffer != "" {
+			baseText = m.keyBuffer
+		}
+		if m.lastCommit != "" {
+			baseText += "  |  last: " + m.lastCommit
+		}
+		leftRendered = lipgloss.NewStyle().Faint(true).Render(baseText)
 	}
-	if m.lastCommit != "" {
-		leftText += "  |  last: " + m.lastCommit
-	}
-	leftStyled := lipgloss.NewStyle().Faint(true).Render(leftText)
 	right := lipgloss.NewStyle().Faint(true).Render("refreshed: " + m.lastRefresh.Format("15:04:05"))
 	w := m.width
 	// Ensure the right part is always visible; truncate left if needed
@@ -899,7 +934,6 @@ func (m model) bottomBar() string {
 		return ansi.Truncate(right, w, "…")
 	}
 	avail := w - rightW - 1 // 1 space gap
-	leftRendered := leftStyled
 	if lipgloss.Width(leftRendered) > avail {
 		leftRendered = ansi.Truncate(leftRendered, avail, "…")
 	} else if lipgloss.Width(leftRendered) < avail {
@@ -1327,7 +1361,10 @@ func runPull(repoRoot string) tea.Cmd {
 	}
 }
 
-type branchResultMsg struct{ err error }
+type branchResultMsg struct {
+	err error
+	out string
+}
 
 func loadBranches(repoRoot string) tea.Cmd {
 	return func() tea.Msg {
@@ -1382,8 +1419,7 @@ func (m model) branchOverlayLines(width int) []string {
 		title := lipgloss.NewStyle().Bold(true).Render("Checkout — Confirm (y/enter: checkout, b: back, esc: cancel)")
 		lines = append(lines, title)
 		if len(m.brBranches) > 0 {
-			name := m.brBranches[m.brIndex]
-			lines = append(lines, fmt.Sprintf("Branch: %s", name))
+			lines = append(lines, fmt.Sprintf("Branch: %s", m.brBranches[m.brIndex]))
 		}
 		if m.brRunning {
 			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render("Checking out…"))
@@ -1477,10 +1513,10 @@ func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if len(m.brBranches) == 0 {
 					return m, nil
 				}
-				name := m.brBranches[m.brIndex]
+				// name := m.brBranches[m.brIndex]
 				m.brRunning = true
 				m.brErr = ""
-				return m, runCheckout(m.repoRoot, name)
+				return m, m.checkoutBranch()
 			}
 			return m, nil
 		}
@@ -1549,7 +1585,7 @@ func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				m.brRunning = true
 				m.brErr = ""
-				return m, runCreateBranch(m.repoRoot, name)
+				return m, m.checkoutNewBranch()
 			}
 			return m, nil
 		}
@@ -1557,21 +1593,23 @@ func (m model) handleBranchKeys(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func runCheckout(repoRoot, branch string) tea.Cmd {
+func (m *model) checkoutBranch() tea.Cmd {
 	return func() tea.Msg {
-		if err := gitx.Checkout(repoRoot, branch); err != nil {
-			return branchResultMsg{err: err}
+		out, err := gitx.CheckoutBranch(m.repoRoot, m.brBranches[m.brIndex])
+		if err != nil {
+			return branchResultMsg{err: err, out: out}
 		}
-		return branchResultMsg{err: nil}
+		return branchResultMsg{err: nil, out: out}
 	}
 }
 
-func runCreateBranch(repoRoot, name string) tea.Cmd {
+func (m *model) checkoutNewBranch() tea.Cmd {
 	return func() tea.Msg {
-		if err := gitx.CheckoutNew(repoRoot, name); err != nil {
-			return branchResultMsg{err: err}
+		out, err := gitx.CheckoutNewBranch(m.repoRoot, m.brInput.Value())
+		if err != nil {
+			return branchResultMsg{err: err, out: out}
 		}
-		return branchResultMsg{err: nil}
+		return branchResultMsg{err: nil, out: out}
 	}
 }
 
