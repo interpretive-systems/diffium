@@ -390,28 +390,26 @@ func ListBranches(repoRoot string) ([]string, string, error) {
 	return out, current, nil
 }
 
-// Checkout switches branches using `git checkout <branch>`.
-func Checkout(repoRoot, branch string) error {
-	if strings.TrimSpace(branch) == "" {
-		return errors.New("empty branch name")
-	}
-	cmd := exec.Command("git", "-C", repoRoot, "checkout", branch)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git checkout %s: %w: %s", branch, err, string(out))
-	}
-	return nil
+// CheckoutBranch switches to an existing branch
+func CheckoutBranch(repoRoot string, branchName string) (string, error) {
+	out, err := exec.Command("git", "-C", repoRoot, "checkout", branchName).CombinedOutput()
+	return string(out), err
 }
 
-// CheckoutNew creates and switches to a new branch: `git checkout -b <name>`.
-func CheckoutNew(repoRoot, name string) error {
-	if strings.TrimSpace(name) == "" {
-		return errors.New("empty branch name")
+// CheckoutNewBranch creates and switches to a new branch
+func CheckoutNewBranch(repoRoot string, branchName string) (string, error) {
+	out, err := exec.Command("git", "-C", repoRoot, "checkout", "-b", branchName).CombinedOutput()
+	return string(out), err
+}
+
+// DiffSummary returns a short summary of changes like git diff --shortstat
+func DiffSummary(repoRoot string) (string, error) {
+	cmd := exec.Command("git", "-C", repoRoot, "diff", "--shortstat")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
 	}
-	cmd := exec.Command("git", "-C", repoRoot, "checkout", "-b", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git checkout -b %s: %w: %s", name, err, string(out))
-	}
-	return nil
+	return strings.TrimSpace(string(out)), nil
 }
 
 // Pull runs `git pull` in the repository.
