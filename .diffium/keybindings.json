@@ -1,5 +1,5 @@
 {
-  "quit": ["ctr+c", "q"],
+  "quit": ["ctrl+c", "q"],
   "help": ["h"],
   "commit": ["c"],
   "uncommit": ["u"],
