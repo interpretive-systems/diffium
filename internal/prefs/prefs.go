@@ -2,7 +2,9 @@ package prefs
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -15,6 +17,15 @@ type Prefs struct {
 	SideSet    bool
 	LeftWidth  int
 	LeftSet    bool
+}
+
+// GetConfigDir returns the path to the diffium config directory
+func GetConfigDir() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get config directory: %w", err)
+	}
+	return filepath.Join(configDir, "diffium"), nil
 }
 
 const (
