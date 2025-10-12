@@ -1,0 +1,18 @@
+{
+  "quit": ["ctrl+c", "q"],
+  "help": ["h"],
+  "commit": ["c"],
+  "uncommit": ["u"],
+  "branch_switch": ["b"],
+  "pull": ["p"],
+  "reset": ["R"],
+  "search": ["/"],
+  "refresh": ["r"],
+  "side_by_side": ["s"],
+  "toggle_wrap": ["w"],
+  "toggle_diff_mode": ["t"],
+  "navigate_up": ["k", "up"],
+  "navigate_down": ["j", "down"],
+  "navigate_page_up": ["K", "pgup"],
+  "navigate_page_down": ["J", "pgdown"]
+}

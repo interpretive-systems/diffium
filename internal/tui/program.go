@@ -2,8 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/interpretive-systems/diffium/internal/config"
 	"github.com/interpretive-systems/diffium/internal/diffview"
 	"github.com/interpretive-systems/diffium/internal/gitx"
 	"github.com/interpretive-systems/diffium/internal/prefs"
@@ -30,6 +31,7 @@ const (
 type model struct {
 	repoRoot       string
 	theme          Theme
+	ready          bool
 	files          []gitx.FileChange
 	selected       int
 	rows           []diffview.Row
@@ -46,6 +48,7 @@ type model struct {
 	rightVP        viewport.Model
 	rightXOffset   int
 	wrapLines      bool
+	keyBindings    config.KeyBindings
 
 	rightContent []string
 
@@ -133,7 +136,27 @@ type diffMsg struct {
 
 // Run instantiates and runs the Bubble Tea program.
 func Run(repoRoot string) error {
-	m := model{repoRoot: repoRoot, sideBySide: true, diffMode: "head", theme: loadThemeFromRepo(repoRoot)}
+	// Get config directory
+	configDir, err := prefs.GetConfigDir()
+	if err != nil {
+		configDir = filepath.Join(repoRoot, ".diffium")
+	}
+
+	// Load key bindings
+	kb, err := config.LoadKeyBindings(configDir)
+	if err != nil {
+		// Use defaults on error
+		kb = config.DefaultKeyBindings()
+	}
+
+	m := model{
+		repoRoot:    repoRoot,
+		sideBySide:  true,
+		diffMode:    "head",
+		theme:       loadThemeFromRepo(repoRoot),
+		keyBindings: kb,
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return err
@@ -147,286 +170,6 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		if m.searchActive {
-			return m.handleSearchKeys(msg)
-		}
-		if m.showHelp {
-			switch msg.String() {
-			case "q":
-				return m, tea.Quit
-			case "h", "esc":
-				(&m).closeSearch()
-				m.showHelp = false
-				return m, m.recalcViewport()
-			default:
-				return m, nil
-			}
-		}
-		if m.showCommit {
-			return m.handleCommitKeys(msg)
-		}
-		if m.showUncommit {
-			return m.handleUncommitKeys(msg)
-		}
-		if m.showResetClean {
-			return m.handleResetCleanKeys(msg)
-		}
-		if m.showBranch {
-			return m.handleBranchKeys(msg)
-		}
-		if m.showPull {
-			return m.handlePullKeys(msg)
-		}
-
-		key := msg.String()
-
-		if isNumericKey(key) {
-			m.keyBuffer += key
-			return m, nil
-		}
-
-		if !isNumericKey(key) && !isMovementKey(key) {
-			m.keyBuffer = ""
-		}
-
-		switch key {
-		case "ctrl+c", "q":
-			return m, tea.Quit
-		case "h":
-			(&m).closeSearch()
-			m.showHelp = true
-			return m, m.recalcViewport()
-		case "c":
-			// Open commit wizard
-			(&m).closeSearch()
-			m.openCommitWizard()
-			return m, m.recalcViewport()
-		case "u":
-			// Open uncommit wizard
-			m.openUncommitWizard()
-			return m, tea.Batch(loadUncommitFiles(m.repoRoot), loadUncommitEligible(m.repoRoot), m.recalcViewport())
-		case "b":
-			m.openBranchWizard()
-			return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
-		case "p":
-			m.openPullWizard()
-			return m, m.recalcViewport()
-		case "R":
-			// Open reset/clean wizard
-			m.openResetCleanWizard()
-			return m, m.recalcViewport()
-		case "/":
-			(&m).openSearch()
-			return m, m.recalcViewport()
-		case "<", "H":
-			if m.leftWidth == 0 {
-				m.leftWidth = m.width / 3
-			}
-			m.leftWidth -= 2
-			if m.leftWidth < 20 {
-				m.leftWidth = 20
-			}
-			_ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
-			return m, m.recalcViewport()
-		case ">", "L":
-			if m.leftWidth == 0 {
-				m.leftWidth = m.width / 3
-			}
-			m.leftWidth += 2
-			maxLeft := m.width - 20
-			if maxLeft < 20 {
-				maxLeft = 20
-			}
-			if m.leftWidth > maxLeft {
-				m.leftWidth = maxLeft
-			}
-			_ = prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
-			return m, m.recalcViewport()
-		case "j", "down":
-			if len(m.files) == 0 {
-				return m, nil
-			}
-			if m.selected < len(m.files)-1 {
-				if m.keyBuffer == "" {
-					m.selected++
-				} else {
-					jump, err := strconv.Atoi(m.keyBuffer)
-					if err != nil {
-						m.selected++
-					} else {
-						m.selected += jump
-						m.selected = min(m.selected, len(m.files)-1)
-					}
-					m.keyBuffer = ""
-				}
-				m.rows = nil
-				// Reset scroll for new file
-				m.rightVP.GotoTop()
-				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
-			}
-		case "k", "up":
-			if len(m.files) == 0 {
-				m.keyBuffer = ""
-			}
-			if m.selected > 0 {
-				if m.keyBuffer == "" {
-					m.selected--
-				} else {
-					jump, err := strconv.Atoi(m.keyBuffer)
-					if err != nil {
-						m.selected--
-					} else {
-						m.selected -= jump
-						m.selected = max(m.selected, 0)
-					}
-					m.keyBuffer = ""
-				}
-				m.rows = nil
-				m.rightVP.GotoTop()
-				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
-			}
-		case "g":
-			if len(m.files) > 0 {
-				m.selected = 0
-				m.rows = nil
-				m.rightVP.GotoTop()
-				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
-			}
-		case "G":
-			if len(m.files) > 0 {
-				m.selected = len(m.files) - 1
-				m.rows = nil
-				m.rightVP.GotoTop()
-				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
-			}
-		case "[":
-			// Page up left pane
-			vis := m.rightVP.Height
-			if vis <= 0 {
-				vis = 10
-			}
-			step := vis - 1
-			if step < 1 {
-				step = 1
-			}
-			newOffset := m.leftOffset - step
-			if newOffset < 0 {
-				newOffset = 0
-			}
-			// Keep selection visible within new viewport
-			if m.selected < newOffset {
-				newOffset = m.selected
-			}
-			maxStart := len(m.files) - vis
-			if maxStart < 0 {
-				maxStart = 0
-			}
-			if newOffset > maxStart {
-				newOffset = maxStart
-			}
-			m.leftOffset = newOffset
-			return m, m.recalcViewport()
-		case "]":
-			// Page down left pane
-			vis := m.rightVP.Height
-			if vis <= 0 {
-				vis = 10
-			}
-			step := vis - 1
-			if step < 1 {
-				step = 1
-			}
-			maxStart := len(m.files) - vis
-			if maxStart < 0 {
-				maxStart = 0
-			}
-			newOffset := m.leftOffset + step
-			if newOffset > maxStart {
-				newOffset = maxStart
-			}
-			// Keep selection visible within new viewport
-			if m.selected >= newOffset+vis {
-				newOffset = m.selected - vis + 1
-				if newOffset < 0 {
-					newOffset = 0
-				}
-			}
-			m.leftOffset = newOffset
-			return m, m.recalcViewport()
-		case "n":
-			return m, (&m).advanceSearch(1)
-		case "N":
-			return m, (&m).advanceSearch(-1)
-		case "r":
-			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadCurrentDiff(m))
-		case "s":
-			m.sideBySide = !m.sideBySide
-			_ = prefs.SaveSideBySide(m.repoRoot, m.sideBySide)
-			return m, m.recalcViewport()
-		case "t":
-			if m.diffMode == "head" {
-				m.diffMode = "staged"
-			} else {
-				m.diffMode = "head"
-			}
-			m.rows = nil
-			m.selected = 0
-			m.rightVP.GotoTop()
-			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
-		case "w":
-			// Toggle wrap in diff pane
-			m.wrapLines = !m.wrapLines
-			if m.wrapLines {
-				m.rightXOffset = 0
-			}
-			_ = prefs.SaveWrap(m.repoRoot, m.wrapLines)
-			return m, m.recalcViewport()
-		// Horizontal scroll for right pane
-		case "left", "{":
-			if m.wrapLines {
-				return m, nil
-			}
-			if m.rightXOffset > 0 {
-				m.rightXOffset -= 4
-				if m.rightXOffset < 0 {
-					m.rightXOffset = 0
-				}
-				return m, m.recalcViewport()
-			}
-			return m, nil
-		case "right", "}":
-			if m.wrapLines {
-				return m, nil
-			}
-			m.rightXOffset += 4
-			return m, m.recalcViewport()
-		case "home":
-			if m.rightXOffset != 0 {
-				m.rightXOffset = 0
-				return m, m.recalcViewport()
-			}
-			return m, nil
-		// Right pane scrolling
-		case "pgdown":
-			m.rightVP.PageDown()
-			return m, nil
-		case "pgup":
-			m.rightVP.PageUp()
-			return m, nil
-		case "J", "ctrl+d":
-			m.rightVP.HalfPageDown()
-			return m, nil
-		case "K", "ctrl+u":
-			m.rightVP.HalfPageUp()
-			return m, nil
-		case "ctrl+e":
-			m.rightVP.LineDown(1)
-			return m, nil
-		case "ctrl+y":
-			m.rightVP.LineUp(1)
-			return m, nil
-		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -449,22 +192,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.leftWidth = maxLeft
 			}
 		}
+
+		if !m.ready {
+			m.ready = true
+			return m, tea.Batch(
+				loadFiles(m.repoRoot, m.diffMode),
+				m.recalcViewport(),
+			)
+		}
 		return m, m.recalcViewport()
-	case clearStatusMsg:
-		m.status = ""
-		return m, nil
+
 	case tickMsg:
-		// Periodic refresh
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadCurrentBranch(m.repoRoot), tickOnce())
+
 	case filesMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("status error: %v", msg.err)
 			return m, nil
 		}
-		// Stable-sort files by path for deterministic UI
 		sort.Slice(msg.files, func(i, j int) bool { return msg.files[i].Path < msg.files[j].Path })
 
-		// Preserve selection by path if possible
 		var selPath string
 		if len(m.files) > 0 && m.selected >= 0 && m.selected < len(m.files) {
 			selPath = m.files[m.selected].Path
@@ -472,7 +219,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files = msg.files
 		m.lastRefresh = time.Now()
 
-		// Reselect
 		m.selected = 0
 		if selPath != "" {
 			for i, f := range m.files {
@@ -482,33 +228,177 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		// Load diff for selected if exists
 		if len(m.files) > 0 {
 			return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
 		}
 		m.rows = nil
 		return m, m.recalcViewport()
+
 	case diffMsg:
 		if msg.err != nil {
 			m.status = fmt.Sprintf("diff error: %v", msg.err)
 			m.rows = nil
 			return m, m.recalcViewport()
 		}
-		// Only update if this diff is for the currently selected file
 		if len(m.files) > 0 && m.files[m.selected].Path == msg.path {
 			m.rows = msg.rows
 		}
 		return m, m.recalcViewport()
+
+	case tea.KeyMsg:
+		if m.showHelp {
+			switch msg.String() {
+			case "esc", "h", "q":
+				m.showHelp = false
+				return m, m.recalcViewport()
+			}
+			return m, nil
+		}
+		if m.showCommit {
+			return m.handleCommitKeys(msg)
+		}
+		if m.showUncommit {
+			return m.handleUncommitKeys(msg)
+		}
+		if m.showResetClean {
+			return m.handleResetCleanKeys(msg)
+		}
+		if m.showBranch {
+			return m.handleBranchKeys(msg)
+		}
+		if m.showPull {
+			return m.handlePullKeys(msg)
+		}
+		if m.searchActive {
+			return m.handleSearchKeys(msg)
+		}
+
+		// Check quit keys from config
+		for _, quitKey := range m.keyBindings.Quit {
+			if msg.String() == quitKey {
+				return m, tea.Quit
+			}
+		}
+		switch msg.String() {
+		case "h":
+			m.showHelp = true
+			return m, m.recalcViewport()
+		case "r":
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadCurrentBranch(m.repoRoot))
+		case "j", "down":
+			if len(m.files) > 0 && m.selected < len(m.files)-1 {
+				m.selected++
+				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
+			}
+		case "k", "up":
+			if m.selected > 0 {
+				m.selected--
+				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
+			}
+		case "g":
+			if len(m.files) > 0 {
+				m.selected = 0
+				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
+			}
+		case "G":
+			if len(m.files) > 0 {
+				m.selected = len(m.files) - 1
+				return m, tea.Batch(loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode), m.recalcViewport())
+			}
+		case "s":
+			m.sideBySide = !m.sideBySide
+			prefs.SaveSideBySide(m.repoRoot, m.sideBySide)
+			return m, m.recalcViewport()
+		case "t":
+			if m.diffMode == "head" {
+				m.diffMode = "staged"
+			} else {
+				m.diffMode = "head"
+			}
+			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
+		case "w":
+			m.wrapLines = !m.wrapLines
+			if m.wrapLines {
+				m.rightXOffset = 0 // reset horizontal scroll when wrapping
+			}
+			prefs.SaveWrap(m.repoRoot, m.wrapLines)
+			return m, m.recalcViewport()
+		case "H":
+			m.leftWidth -= 2
+			if m.leftWidth < 20 {
+				m.leftWidth = 20
+			}
+			prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
+			return m, m.recalcViewport()
+		case "L":
+			m.leftWidth += 2
+			maxLeft := m.width - 20
+			if maxLeft < 20 {
+				maxLeft = 20
+			}
+			if m.leftWidth > maxLeft {
+				m.leftWidth = maxLeft
+			}
+			prefs.SaveLeftWidth(m.repoRoot, m.leftWidth)
+			return m, m.recalcViewport()
+		case "J", "pgdown":
+			m.rightVP.ScrollDown(10)
+			return m, nil
+		case "K", "pgup":
+			m.rightVP.ScrollUp(10)
+			return m, nil
+		case "{":
+			if !m.wrapLines {
+				m.rightXOffset = max(0, m.rightXOffset-10)
+				return m, m.recalcViewport()
+			}
+		case "}":
+			if !m.wrapLines {
+				m.rightXOffset = max(0, m.rightXOffset+10)
+				return m, m.recalcViewport()
+			}
+		case "[":
+			if m.leftOffset > 0 {
+				m.leftOffset = max(0, m.leftOffset-5)
+				return m, m.recalcViewport()
+			}
+		case "]":
+			if m.leftOffset < len(m.files) {
+				m.leftOffset = min(len(m.files), m.leftOffset+5)
+				return m, m.recalcViewport()
+			}
+		case "b":
+			m.openBranchWizard()
+			return m, tea.Batch(loadBranches(m.repoRoot), m.recalcViewport())
+		case "p":
+			m.openPullWizard()
+			return m, m.recalcViewport()
+		case "u":
+			m.openUncommitWizard()
+			return m, tea.Batch(loadUncommitFiles(m.repoRoot), m.recalcViewport())
+		case "R":
+			m.openResetCleanWizard()
+			return m, m.recalcViewport()
+		case "c":
+			m.openCommitWizard()
+			return m, m.recalcViewport()
+		case "/":
+			m.openSearch()
+			return m, m.recalcViewport()
+		}
+
 	case lastCommitMsg:
 		if msg.err == nil {
 			m.lastCommit = msg.summary
 		}
 		return m, nil
+
 	case currentBranchMsg:
 		if msg.err == nil {
 			m.currentBranch = msg.name
 		}
 		return m, nil
+
 	case prefsMsg:
 		if msg.err == nil {
 			if msg.p.SideSet {
@@ -522,7 +412,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.p.LeftSet {
 				m.savedLeftWidth = msg.p.LeftWidth
-				// If we already know the window size, apply immediately.
 				if m.width > 0 {
 					lw := m.savedLeftWidth
 					if lw < 24 {
@@ -541,6 +430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
 	case pullResultMsg:
 		m.plRunning = false
 		// Always show result output in overlay; close with enter/esc
@@ -554,6 +444,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showPull = true
 		// Refresh repo state after pull
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+
 	case branchListMsg:
 		if msg.err != nil {
 			m.brErr = msg.err.Error()
@@ -574,6 +465,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, m.recalcViewport()
+
 	case branchResultMsg:
 		if msg.err != nil {
 			m.brErr = msg.err.Error()
@@ -610,6 +502,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.brIndex = 0
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), loadCurrentBranch(m.repoRoot), m.recalcViewport())
+
 	case rcPreviewMsg:
 		m.rcPreviewErr = ""
 		if msg.err != nil {
@@ -619,6 +512,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rcPreviewLines = msg.lines
 		}
 		return m, m.recalcViewport()
+
 	case rcResultMsg:
 		m.rcRunning = false
 		if msg.err != nil {
@@ -630,10 +524,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rcDone = true
 		m.showResetClean = false
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), m.recalcViewport())
+
 	case commitProgressMsg:
 		m.committing = true
 		m.commitErr = ""
 		return m, nil
+
 	case commitResultMsg:
 		m.committing = false
 		if msg.err != nil {
@@ -641,14 +537,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.commitDone = false
 			// refresh even on error (commit may have succeeded but push failed)
 			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
-		} else {
-			m.commitErr = ""
-			m.commitDone = true
-			m.showCommit = false
-			// refresh changes and last commit
-			return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
 		}
-		return m, nil
+		m.commitErr = ""
+		m.commitDone = true
+		m.showCommit = false
+		// refresh changes and last commit
+		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
+
 	case uncommitFilesMsg:
 		if msg.err != nil {
 			m.uncommitErr = msg.err.Error()
@@ -664,6 +559,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ucIndex = 0
 		return m, m.recalcViewport()
+
 	case uncommitEligibleMsg:
 		if msg.err != nil {
 			// No parent commit or other issue; treat as no eligible files.
@@ -675,6 +571,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ucEligible[p] = true
 		}
 		return m, m.recalcViewport()
+
 	case uncommitResultMsg:
 		m.uncommitting = false
 		if msg.err != nil {
@@ -687,6 +584,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showUncommit = false
 		return m, tea.Batch(loadFiles(m.repoRoot, m.diffMode), loadLastCommit(m.repoRoot), m.recalcViewport())
 	}
+
 	return m, nil
 }
 
@@ -842,66 +740,6 @@ func (m model) leftBodyLines(max int) []string {
 	return lines
 }
 
-func (m model) rightBodyLines(max, width int) []string {
-	lines := make([]string, 0, max)
-	if len(m.files) == 0 {
-		return lines
-	}
-	if m.files[m.selected].Binary {
-		lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(Binary file; no text diff)"))
-		return lines
-	}
-	if m.rows == nil {
-		lines = append(lines, "Loading diff…")
-		return lines
-	}
-	if m.sideBySide {
-		colsW := (width - 1) / 2
-		if colsW < 10 {
-			colsW = 10
-		}
-		mid := m.theme.DividerText("│")
-		for _, r := range m.rows {
-			switch r.Kind {
-			case diffview.RowHunk:
-				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render(r.Meta))
-			case diffview.RowMeta:
-				// skip
-			default:
-				l := padToWidth(m.colorizeLeft(r), colsW)
-				rr := padToWidth(m.colorizeRight(r), colsW)
-				lines = append(lines, l+mid+rr)
-			}
-			if len(lines) >= max {
-				break
-			}
-		}
-	} else {
-		for _, r := range m.rows {
-			switch r.Kind {
-			case diffview.RowHunk:
-				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Render(r.Meta))
-			case diffview.RowContext:
-				lines = append(lines, " "+r.Left)
-			case diffview.RowAdd:
-				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render("+ "+r.Right))
-			case diffview.RowDel:
-				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("- "+r.Left))
-			case diffview.RowReplace:
-				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("- "+r.Left))
-				if len(lines) >= max {
-					break
-				}
-				lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render("+ "+r.Right))
-			}
-			if len(lines) >= max {
-				break
-			}
-		}
-	}
-	return lines
-}
-
 func (m model) topRightTitle() string {
 	if len(m.files) == 0 {
 		return fmt.Sprintf("[%s]", strings.ToUpper(m.diffMode))
@@ -1004,13 +842,6 @@ func loadDiff(repoRoot, path, diffMode string) tea.Cmd {
 	}
 }
 
-func loadCurrentDiff(m model) tea.Cmd {
-	if len(m.files) == 0 {
-		return nil
-	}
-	return loadDiff(m.repoRoot, m.files[m.selected].Path, m.diffMode)
-}
-
 func tickOnce() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
 }
@@ -1024,46 +855,6 @@ func padToWidth(s string, w int) string {
 		return s + strings.Repeat(" ", w-width)
 	}
 	return ansi.Truncate(s, w, "…")
-}
-
-func (m model) viewHelp() string {
-	// Full-screen simple help panel
-	var b strings.Builder
-	title := lipgloss.NewStyle().Bold(true).Render("Diffium Help")
-	lines := []string{
-		"",
-		"j/k or arrows  Move selection",
-		"J/K, PgDn/PgUp  Scroll diff",
-		"</> or H/L      Adjust left pane width",
-		"[/]            Page left file list",
-		"{/}            Horizontal scroll (diff)",
-		"b              Switch branch (open wizard)",
-		"s              Toggle side-by-side / inline",
-		"r              Refresh now",
-		"g / G          Top / Bottom",
-		"h or Esc       Close help",
-		"q              Quit",
-		"",
-		"Press 'h' or 'Esc' to close.",
-	}
-	// Center-ish: add left padding
-	pad := 4
-	if m.width > 60 {
-		pad = (m.width - 60) / 2
-		if pad < 4 {
-			pad = 4
-		}
-	}
-	leftPad := strings.Repeat(" ", pad)
-	fmt.Fprintln(&b, leftPad+title)
-	for _, l := range lines {
-		fmt.Fprintln(&b, leftPad+l)
-	}
-	// Bottom hint
-	hint := lipgloss.NewStyle().Faint(true).Render("h: help    refreshed: " + m.lastRefresh.Format("15:04:05"))
-	fmt.Fprintln(&b)
-	fmt.Fprint(&b, padToWidth(hint, m.width))
-	return b.String()
 }
 
 // recalcViewport recalculates right viewport size and content based on current state.
@@ -1182,9 +973,7 @@ func (m model) helpOverlayLines(width int) []string {
 	// Overlay top rule
 	lines = append(lines, strings.Repeat("─", width))
 	lines = append(lines, title)
-	for _, k := range keys {
-		lines = append(lines, k)
-	}
+	lines = append(lines, keys...)
 	return lines
 }
 
@@ -1862,13 +1651,6 @@ func loadUncommitFiles(repoRoot string) tea.Cmd {
 type uncommitEligibleMsg struct {
 	paths []string
 	err   error
-}
-
-func loadUncommitEligible(repoRoot string) tea.Cmd {
-	return func() tea.Msg {
-		ps, err := gitx.FilesInLastCommit(repoRoot)
-		return uncommitEligibleMsg{paths: ps, err: err}
-	}
 }
 
 func (m *model) openUncommitWizard() {
@@ -2740,36 +2522,6 @@ func runCommit(repoRoot string, paths []string, message string) tea.Cmd {
 	}
 }
 
-func (m model) colorizeLeft(r diffview.Row) string {
-	switch r.Kind {
-	case diffview.RowContext:
-		return r.Left
-	case diffview.RowDel:
-		return m.theme.DelText(r.Left)
-	case diffview.RowReplace:
-		return m.theme.DelText(r.Left)
-	case diffview.RowAdd:
-		return ""
-	default:
-		return r.Left
-	}
-}
-
-func (m model) colorizeRight(r diffview.Row) string {
-	switch r.Kind {
-	case diffview.RowContext:
-		return r.Right
-	case diffview.RowAdd:
-		return m.theme.AddText(r.Right)
-	case diffview.RowReplace:
-		return m.theme.AddText(r.Right)
-	case diffview.RowDel:
-		return ""
-	default:
-		return r.Right
-	}
-}
-
 // renderSideCell renders a left or right cell with a colored marker and padding.
 // side is "left" or "right". width is the total cell width.
 func (m model) renderSideCell(r diffview.Row, side string, width int) string {
@@ -2878,12 +2630,4 @@ func padExact(s string, w int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", w-sw)
-}
-
-func isMovementKey(key string) bool {
-	return key == "j" || key == "k"
-}
-
-func isNumericKey(key string) bool {
-	return key <= "9" && key >= "0"
 }
