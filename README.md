@@ -3,12 +3,12 @@ Diffium is a CLI tool to help you better understand git diffs, with the main int
 
 ## Dependencies
 
-go: go1.25.1
-git
-
+- go: go1.25.1
+- git
+```
 brew install go
 brew install git
-
+```
 ## Stage 1 (WIP)
 
 Watcher TUI that shows changed files on the left and a side-by-side diff on the right.
